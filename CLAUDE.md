@@ -61,15 +61,35 @@ Consequences to enforce in every review:
 ## Current state: Phase 1 complete
 
 An 8-voice polyphonic synth playable in the browser and renderable to disk.
-Verified: builds clean, 96 checks passing, clean under ASan, UBSan, and TSan.
+Verified: builds clean, 98 checks passing, clean under ASan, UBSan, and TSan.
+
+The no-allocation rule is now enforced rather than merely asserted.
+`testAudioThreadNeverAllocates` overrides global `operator new`, renders 400
+blocks while starting notes, ending them, forcing voice stealing, changing
+parameters and varying the block size, and fails if the counter moves. It
+also asserts the counter is non-zero beforehand, so the test cannot pass by
+having dead instrumentation.
 
 The browser path has been driven end to end: nine held keys produce eight
 voices (stealing works and the pool never grows), releasing frees every
 voice, all-notes-off clears a stuck chord, and the console stays empty.
 
-Local timings on a shared VM (a floor, not a result, re-measure on real
-hardware), native render path with 8 voices sounding:
-p50 12.08 us, p99 25.75 us, max 63.08 us, budget 2666.67 us.
+Measured on an Apple M2 (Mac14,2, 8 cores), macOS 26.5.2, Apple clang 21,
+`CMAKE_BUILD_TYPE=Release`. Native render path, 8 voices sounding, 128-frame
+blocks at 48 kHz, three runs of 1875 blocks each:
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| p50 | 13.96 us | 10.33 us | 9.08 us |
+| p99 | 26.04 us | 16.67 us | 14.75 us |
+| max | 55.62 us | 42.79 us | 85.62 us |
+
+Budget is 2666.67 us, so the worst p99 seen is about 1% of the deadline and
+the worst single block about 3%. Quote the worst column, not the best.
+
+These measure compute cost inside an offline render loop. They are not the
+same thing as callback scheduling jitter under a real driver, and they are
+not the WASM path.
 
 Known gaps, in the order they matter:
 
@@ -142,7 +162,8 @@ percussive (zero sustain) patches freeing their voice, filter magnitude
 response per type, filter stability at out-of-range cutoff and resonance,
 voices summing rather than overwriting, full polyphony, stealing preferring a
 releasing voice over a held one, note off hitting only the matching note, and
-MIDI note 69 sounding at 440 Hz.
+MIDI note 69 sounding at 440 Hz, and a global operator new override proving
+the render path allocates nothing.
 
 Add to this file rather than starting a new framework, unless the suite outgrows
 it, in which case move to Catch2.

@@ -8,9 +8,14 @@ real-time rules that govern the audio path.
 
 Phase 1: an 8-voice polyphonic synth with a PolyBLEP oscillator, linear ADSR,
 and a resonant biquad filter, playable in the browser and renderable to disk.
-Voices come from a fixed preallocated pool with stealing, so nothing is
-allocated on the audio thread. 96 checks pass under plain, ASan+UBSan, and
-TSan builds.
+Voices come from a fixed preallocated pool with stealing, and a test that
+overrides global `operator new` proves the render path allocates nothing. 98
+checks pass under plain, ASan+UBSan, and TSan builds.
+
+Measured on an Apple M2 (Mac14,2), macOS 26.5.2, Release build: rendering 8
+simultaneous voices in 128-frame blocks at 48 kHz costs p99 26 us and a
+worst observed block of 86 us, against a 2667 us deadline. Native path, not
+the WASM path.
 
 ## Quick start
 

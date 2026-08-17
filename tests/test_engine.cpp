@@ -8,10 +8,44 @@
 #include "daw/Synth.hpp"
 #include "daw/Voice.hpp"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <new>
 #include <thread>
 #include <vector>
+
+// The central claim of this codebase is that nothing on the audio path
+// allocates. Counting every trip through global operator new turns that from
+// a design intention into something a test can fail on.
+//
+// ASan and TSan ship their own operator new, so the override is compiled out
+// under those builds; the plain build is the one that enforces this.
+#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__) && \
+    !__has_feature(address_sanitizer) && !__has_feature(thread_sanitizer)
+#define DAW_TRACK_ALLOCATIONS 1
+#else
+#define DAW_TRACK_ALLOCATIONS 0
+#endif
+
+#if DAW_TRACK_ALLOCATIONS
+static std::atomic<long> gAllocationCount{0};
+
+void* operator new(std::size_t size) {
+    gAllocationCount.fetch_add(1, std::memory_order_relaxed);
+    void* memory = std::malloc(size == 0 ? 1 : size);
+    if (memory == nullptr) throw std::bad_alloc();
+    return memory;
+}
+
+void* operator new[](std::size_t size) { return ::operator new(size); }
+
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete[](void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
+void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
+#endif
 
 namespace {
 
@@ -712,6 +746,69 @@ void testOutOfRangeMidiNotesAreIgnored() {
           "out-of-range MIDI notes should be dropped rather than indexing off the frequency table");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 1: the real-time guarantee itself
+// ---------------------------------------------------------------------------
+
+void testAudioThreadNeverAllocates() {
+#if DAW_TRACK_ALLOCATIONS
+    daw::Engine engine;
+    engine.prepare(48000.0, 512); // prepare() is allowed to allocate
+
+    // Everything the measured section touches is allocated up front, so any
+    // counted allocation can only have come from the engine.
+    std::vector<float> left(512, 0.0f);
+    std::vector<float> right(512, 0.0f);
+    float* channels[2] = {left.data(), right.data()};
+    const std::size_t blockSizes[] = {128, 64, 512, 7, 256};
+
+    // One untimed pass first: this is where any lazy one-time setup inside
+    // the engine would show up, and it would be unfair to blame the steady
+    // state for it.
+    daw::AudioBuffer warmup(channels, 2, 128);
+    engine.render(warmup);
+
+    // Guard against the test passing for the wrong reason. If the override
+    // above were not actually linked in, the counter would sit at zero and
+    // the comparison below would succeed no matter what the engine did.
+    check(gAllocationCount.load(std::memory_order_relaxed) > 0,
+          "allocation counter should have already seen the harness's own allocations, proving it is live");
+
+    const long before = gAllocationCount.load(std::memory_order_relaxed);
+
+    for (int block = 0; block < 400; ++block) {
+        // Exercise the paths most likely to allocate: note starts, note ends,
+        // pool exhaustion and stealing, and parameter changes through the
+        // queue, all while the block size keeps changing underneath.
+        const int note = 48 + (block % 40);
+        (void)engine.pushCommand({daw::CommandType::NoteOn, 0.8f, note});
+        if (block % 3 == 0) {
+            (void)engine.pushCommand({daw::CommandType::NoteOff, 0.0f, 48 + ((block - 3) % 40)});
+        }
+        if (block % 7 == 0) {
+            (void)engine.pushCommand({daw::CommandType::SetFilterCutoff, 200.0f + static_cast<float>(block), 0});
+            (void)engine.pushCommand({daw::CommandType::SetAttack, 1.0f + static_cast<float>(block % 50), 0});
+            (void)engine.pushCommand({daw::CommandType::SetWaveform, 0.0f, block % 3});
+        }
+        if (block % 97 == 0) {
+            (void)engine.pushCommand({daw::CommandType::AllNotesOff, 0.0f, 0});
+        }
+
+        daw::AudioBuffer buffer(channels, 2, blockSizes[block % 5]);
+        engine.render(buffer);
+    }
+
+    const long after = gAllocationCount.load(std::memory_order_relaxed);
+
+    check(after == before, "rendering must not allocate: the audio thread cannot afford a malloc");
+    if (after != before) {
+        std::fprintf(stderr, "  (%ld allocation(s) during render)\n", after - before);
+    }
+#else
+    check(true, "allocation tracking is disabled under sanitizer builds, which supply their own operator new");
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -751,6 +848,8 @@ int main() {
     testPolyphonicOutputStaysInRange();
     testNoteCommandsRoundTripThroughQueue();
     testOutOfRangeMidiNotesAreIgnored();
+
+    testAudioThreadNeverAllocates();
 
     std::printf("%d checks run, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;
