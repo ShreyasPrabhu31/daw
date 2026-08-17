@@ -57,58 +57,73 @@ Consequences to enforce in every review:
 - Anything the audio thread needs is allocated in `prepare()` and handed over
 - Nodes are added only before rendering starts; `nodes_` is never resized on the
   audio thread
+- Graph topology is sorted on the message thread and handed over as a flat
+  plan. The audio thread walks an array; it never traverses a graph, recurses,
+  or allocates a visit set
+- `Graph::rebuild` may block waiting to retire a plan slot, so it is message
+  thread only. It is compiled to a non-blocking refusal under Emscripten,
+  where the caller shares the audio thread
 
-## Current state: Phase 1 complete
+## Current state: Phase 2 complete
 
-An 8-voice polyphonic synth playable in the browser and renderable to disk.
-Verified: builds clean, 98 checks passing, clean under ASan, UBSan, and TSan.
+Four tracks of 8-voice polyphony running through a node graph into a
+saturating master bus, sequenced with sample-accurate events, playable in the
+browser and renderable to disk. 186 checks passing, clean under ASan, UBSan,
+and TSan.
 
-The no-allocation rule is now enforced rather than merely asserted.
+The no-allocation rule is enforced, not merely asserted.
 `testAudioThreadNeverAllocates` overrides global `operator new`, renders 400
 blocks while starting notes, ending them, forcing voice stealing, changing
 parameters and varying the block size, and fails if the counter moves. It
 also asserts the counter is non-zero beforehand, so the test cannot pass by
 having dead instrumentation.
 
-The browser path has been driven end to end: nine held keys produce eight
-voices (stealing works and the pool never grows), releasing frees every
-voice, all-notes-off clears a stuck chord, and the console stays empty.
+The graph swap is covered by a test that republishes the plan twenty times
+while a second thread renders continuously, asserting every sample belongs to
+one complete plan. TSan is clean on it.
 
 Measured on an Apple M2 (Mac14,2, 8 cores), macOS 26.5.2, Apple clang 21,
-`CMAKE_BUILD_TYPE=Release`. Native render path, 8 voices sounding, 128-frame
-blocks at 48 kHz, three runs of 1875 blocks each:
+`CMAKE_BUILD_TYPE=Release`. Native render path, 128-frame blocks at 48 kHz,
+three runs of 1875 blocks each. Worst value of the three shown:
 
-| | run 1 | run 2 | run 3 |
+| workload | p50 | p99 | max |
 |---|---|---|---|
-| p50 | 13.96 us | 10.33 us | 9.08 us |
-| p99 | 26.04 us | 16.67 us | 14.75 us |
-| max | 55.62 us | 42.79 us | 85.62 us |
+| 4 tracks, 16-step loop | 9.58 us | 11.25 us | 62.54 us |
+| 1 track, 8 voices held | 10.17 us | 14.25 us | 48.46 us |
+| 4 tracks, 32 voices held | 38.75 us | 53.79 us | 112.88 us |
 
-Budget is 2666.67 us, so the worst p99 seen is about 1% of the deadline and
-the worst single block about 3%. Quote the worst column, not the best.
+Budget is 2666.67 us. Even 32 simultaneous voices sit at about 2% of the
+deadline at p99. Quote the worst column, never the best.
 
-These measure compute cost inside an offline render loop. They are not the
-same thing as callback scheduling jitter under a real driver, and they are
-not the WASM path.
+These measure compute cost inside an offline render loop. They are not
+callback scheduling jitter under a real driver, and they are not the WASM
+path.
 
 Known gaps, in the order they matter:
 
-- Nobody has listened to the output yet. Every claim above is structural.
+- Nobody has listened to the output yet. Every claim above is structural:
+  tests assert on buffer contents and timing, not on whether it sounds good.
 - Worklet block times have never been measured from inside the browser. The
-  numbers above are the native path; the WASM path is not the same code path.
-- Eight voices at full velocity hit the output clamp at the default master
-  gain (peak lands on exactly 1.0), so a dense chord distorts. The clamp is a
-  safety net, not a mix decision. The real fix is a master bus with a soft
-  limiter, which belongs with the bus work in Phase 2.
+  numbers above are the native path, which is not the same code path.
 - Web MIDI has only been exercised with no device attached, where it
-  correctly reports unavailable. The note-on and note-off decoding path has
-  never seen real controller traffic.
+  correctly reports unavailable. The note decoding path has never seen real
+  controller traffic.
+- Graph topology is fixed once rendering starts in the browser. `rebuild()`
+  may wait for the audio thread to release a plan slot, which is fine on a
+  message thread but forbidden in a worklet, so all four tracks are created
+  in `daw_init`. Adding a track live needs a non-blocking retire path.
+- The scheduler holds 128 events in a flat array scanned linearly per chunk.
+  That is fine for a 16-step pattern and wrong for a real arrangement; it
+  wants a sorted structure with a cursor once Phase 3 has clips.
+- There is no undo, no persistence, and no audio import or export from the
+  browser. Phase 4 is where the project stops being a synth and starts being
+  something a musician could keep work in.
 
 ## Layout
 
 ```
 engine/include/daw/   headers, the portable core
-engine/src/           Engine.cpp, Oscillator.cpp, Synth.cpp, Voice.cpp
+engine/src/           Engine, Graph, MasterBus, Oscillator, Synth, Track, Voice
 cli/                  offline WAV renderer + benchmark harness
 wasm/                 Emscripten bindings and build.sh
 web/                  worklet.js, index.html test bench, _headers
@@ -127,6 +142,10 @@ ctest --test-dir build --output-on-failure
 ./build/cli/daw_render out.wav --seconds 2 --note 69 --wave saw
 ./build/cli/daw_render chord.wav --seconds 3 --note 60 --note 64 --note 67 \
     --wave saw --cutoff 2500 --benchmark
+
+# Four panned tracks, a scheduled arpeggio, looping over the pattern.
+./build/cli/daw_render arp.wav --seconds 5 --tracks 4 \
+    --note 48 --note 55 --note 60 --note 67 --arp 16 --bpm 120 --loop --benchmark
 
 cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DDAW_TSAN=ON
 cmake --build build-tsan -j && ./build-tsan/tests/daw_tests
@@ -165,6 +184,15 @@ releasing voice over a held one, note off hitting only the matching note, and
 MIDI note 69 sounding at 440 Hz, and a global operator new override proving
 the render path allocates nothing.
 
+Phase 2 added: topological ordering of dependencies, fan-in summing across a
+diamond, cycles being refused while the previously published plan keeps
+running, unrouted nodes contributing nothing, a plan republished twenty times
+under a concurrently rendering thread, soft clip boundedness and slope
+continuity at the knee, constant-power panning, mute and solo resolution,
+tracks summing into the bus, a scheduled note landing on its exact sample
+rather than the next block boundary, events staying pending under a stopped
+playhead, and loop passes re-arming events including one on sample zero.
+
 Add to this file rather than starting a new framework, unless the suite outgrows
 it, in which case move to Catch2.
 
@@ -172,9 +200,9 @@ it, in which case move to Catch2.
 
 - **Phase 1** (done) ADSR envelope, biquad filter, `Voice` class, 8-voice
   polyphony with a preallocated pool and voice stealing, Web MIDI input
-- **Phase 2** node graph with topological sort computed on the message thread
-  and walked as a flat array on the audio thread, multiple tracks into a master
-  bus, sample-accurate event scheduling, play/stop/loop
+- **Phase 2** (done) node graph with topological sort computed on the message
+  thread and walked as a flat array on the audio thread, multiple tracks into a
+  master bus, sample-accurate event scheduling, play/stop/loop
 - **Phase 3** canvas timeline with draggable clips, mixer strips, level meters,
   waveform rendering with min/max peak caching
 - **Phase 4** backend service (Drogon or Crow), project save/load, offline render
