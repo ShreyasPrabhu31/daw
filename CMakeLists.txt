@@ -14,8 +14,11 @@ option(DAW_TSAN "Build with ThreadSanitizer" OFF)
 
 add_library(daw_engine STATIC
     engine/src/Engine.cpp
+    engine/src/Graph.cpp
+    engine/src/MasterBus.cpp
     engine/src/Oscillator.cpp
     engine/src/Synth.cpp
+    engine/src/Track.cpp
     engine/src/Voice.cpp
 )
 target_include_directories(daw_engine PUBLIC engine/include)

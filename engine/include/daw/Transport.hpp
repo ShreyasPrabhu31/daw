@@ -33,6 +33,18 @@ public:
         loopStart_ = startSamples;
         loopEnd_ = endSamples;
     }
+
+    [[nodiscard]] std::uint64_t loopStart() const noexcept { return loopStart_; }
+    [[nodiscard]] std::uint64_t loopEnd() const noexcept { return loopEnd_; }
+
+    // How many frames can be rendered before the playhead would jump. The
+    // renderer clamps its chunk to this so a loop point always lands on the
+    // exact sample rather than wherever the block boundary happened to fall.
+    [[nodiscard]] std::uint64_t framesUntilLoopEnd() const noexcept {
+        const bool looping = playing_ && loopEnabled_ && loopEnd_ > loopStart_;
+        if (!looping || position_ >= loopEnd_) return 0;
+        return loopEnd_ - position_;
+    }
     void setLoopEnabled(bool enabled) noexcept { loopEnabled_ = enabled; }
     [[nodiscard]] bool loopEnabled() const noexcept { return loopEnabled_; }
 

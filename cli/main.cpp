@@ -1,6 +1,5 @@
 #include "daw/AudioBuffer.hpp"
 #include "daw/Engine.hpp"
-#include "daw/Synth.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +14,7 @@ namespace {
 struct Args {
     std::string outputPath = "out.wav";
     double seconds = 2.0;
+    std::size_t numTracks = 1;
     std::vector<int> notes;
     float velocity = 0.9f;
     std::string wave = "saw";
@@ -24,9 +24,11 @@ struct Args {
     float releaseMs = 250.0f;
     float cutoffHz = 4000.0f;
     float resonance = 0.9f;
-    // Fraction of the render at which the keys are lifted, so the file
-    // captures the release tail instead of being cut off mid-sustain.
     double holdFraction = 0.6;
+    int arpSteps = 0;
+    double bpm = 120.0;
+    bool loop = false;
+    bool noSaturation = false;
     bool benchmark = false;
 };
 
@@ -92,6 +94,8 @@ int main(int argc, char** argv) {
         const bool hasValue = i + 1 < argc;
         if (arg == "--seconds" && hasValue) {
             args.seconds = std::stod(argv[++i]);
+        } else if (arg == "--tracks" && hasValue) {
+            args.numTracks = static_cast<std::size_t>(std::stoul(argv[++i]));
         } else if (arg == "--note" && hasValue) {
             args.notes.push_back(std::stoi(argv[++i]));
         } else if (arg == "--velocity" && hasValue) {
@@ -112,34 +116,89 @@ int main(int argc, char** argv) {
             args.resonance = std::stof(argv[++i]);
         } else if (arg == "--hold" && hasValue) {
             args.holdFraction = std::stod(argv[++i]);
+        } else if (arg == "--arp" && hasValue) {
+            args.arpSteps = std::stoi(argv[++i]);
+        } else if (arg == "--bpm" && hasValue) {
+            args.bpm = std::stod(argv[++i]);
+        } else if (arg == "--loop") {
+            args.loop = true;
+        } else if (arg == "--no-saturation") {
+            args.noSaturation = true;
         } else if (arg == "--benchmark") {
             args.benchmark = true;
         }
     }
 
-    // A bare invocation should still make a sound: default to a single A440.
     if (args.notes.empty()) args.notes.push_back(69);
+    args.numTracks = std::clamp<std::size_t>(args.numTracks, 1, daw::Engine::kMaxTracks);
 
     constexpr double kSampleRate = 48000.0;
     constexpr std::size_t kBlockSize = 128;
     constexpr std::size_t kNumChannels = 2;
 
     daw::Engine engine;
-    engine.prepare(kSampleRate, kBlockSize);
+    engine.prepare(kSampleRate, kBlockSize, kNumChannels);
 
-    queueOrWarn(engine, {daw::CommandType::SetWaveform, 0.0f, parseWaveform(args.wave)}, "waveform");
-    queueOrWarn(engine, {daw::CommandType::SetAttack, args.attackMs, 0}, "attack");
-    queueOrWarn(engine, {daw::CommandType::SetDecay, args.decayMs, 0}, "decay");
-    queueOrWarn(engine, {daw::CommandType::SetSustain, args.sustain, 0}, "sustain");
-    queueOrWarn(engine, {daw::CommandType::SetRelease, args.releaseMs, 0}, "release");
-    queueOrWarn(engine, {daw::CommandType::SetFilterCutoff, args.cutoffHz, 0}, "cutoff");
-    queueOrWarn(engine, {daw::CommandType::SetFilterResonance, args.resonance, 0}, "resonance");
+    for (std::size_t t = 0; t < args.numTracks; ++t) {
+        if (engine.addTrack() == daw::Engine::kMaxTracks) {
+            std::fprintf(stderr, "error: could not create track %zu\n", t);
+            return 1;
+        }
+    }
 
-    for (int note : args.notes) {
-        queueOrWarn(engine, {daw::CommandType::NoteOn, args.velocity, note}, "note on");
+    // Spread the tracks across the image so multi-track output is audibly
+    // more than one louder track.
+    for (std::size_t t = 0; t < args.numTracks; ++t) {
+        const float pan = args.numTracks == 1
+                              ? 0.0f
+                              : -1.0f + 2.0f * static_cast<float>(t) / static_cast<float>(args.numTracks - 1);
+        const auto track = static_cast<std::uint8_t>(t);
+        queueOrWarn(engine, {daw::CommandType::SetTrackPan, pan, 0, track, 0}, "pan");
+        queueOrWarn(engine, {daw::CommandType::SetWaveform, 0.0f, parseWaveform(args.wave), track, 0}, "waveform");
+        queueOrWarn(engine, {daw::CommandType::SetAttack, args.attackMs, 0, track, 0}, "attack");
+        queueOrWarn(engine, {daw::CommandType::SetDecay, args.decayMs, 0, track, 0}, "decay");
+        queueOrWarn(engine, {daw::CommandType::SetSustain, args.sustain, 0, track, 0}, "sustain");
+        queueOrWarn(engine, {daw::CommandType::SetRelease, args.releaseMs, 0, track, 0}, "release");
+        queueOrWarn(engine, {daw::CommandType::SetFilterCutoff, args.cutoffHz, 0, track, 0}, "cutoff");
+        queueOrWarn(engine, {daw::CommandType::SetFilterResonance, args.resonance, 0, track, 0}, "resonance");
+    }
+
+    if (args.noSaturation) {
+        queueOrWarn(engine, {daw::CommandType::SetMasterSaturation, 0.0f, 0, 0, 0}, "saturation");
     }
 
     const std::size_t totalFrames = static_cast<std::size_t>(args.seconds * kSampleRate);
+
+    if (args.arpSteps > 0) {
+        // Sample-accurate scheduling: every step lands on an exact sample,
+        // regardless of where the 128-frame block boundaries fall.
+        const double secondsPerStep = 60.0 / args.bpm / 2.0; // eighth notes
+        const auto framesPerStep = static_cast<std::uint64_t>(secondsPerStep * kSampleRate);
+
+        for (int step = 0; step < args.arpSteps; ++step) {
+            const int note = args.notes[static_cast<std::size_t>(step) % args.notes.size()];
+            const auto track = static_cast<std::uint8_t>(static_cast<std::size_t>(step) % args.numTracks);
+            const std::uint64_t onAt = static_cast<std::uint64_t>(step) * framesPerStep;
+            const std::uint64_t offAt = onAt + (framesPerStep * 3) / 4;
+
+            queueOrWarn(engine, {daw::CommandType::NoteOn, args.velocity, note, track, true, onAt},
+                        "scheduled note on");
+            queueOrWarn(engine, {daw::CommandType::NoteOff, 0.0f, note, track, true, offAt},
+                        "scheduled note off");
+        }
+
+        if (args.loop) {
+            engine.transport().setLoop(0, static_cast<std::uint64_t>(args.arpSteps) * framesPerStep);
+            queueOrWarn(engine, {daw::CommandType::TransportSetLoop, 0.0f, 1, 0, 0}, "loop");
+        }
+        queueOrWarn(engine, {daw::CommandType::TransportPlay, 0.0f, 0, 0, 0}, "play");
+    } else {
+        for (std::size_t n = 0; n < args.notes.size(); ++n) {
+            const auto track = static_cast<std::uint8_t>(n % args.numTracks);
+            queueOrWarn(engine, {daw::CommandType::NoteOn, args.velocity, args.notes[n], track, 0}, "note on");
+        }
+    }
+
     const std::size_t releaseFrame = static_cast<std::size_t>(static_cast<double>(totalFrames) * args.holdFraction);
 
     std::vector<float> left(kBlockSize), right(kBlockSize);
@@ -154,9 +213,10 @@ int main(int argc, char** argv) {
     std::size_t framesRendered = 0;
     bool released = false;
     while (framesRendered < totalFrames) {
-        if (!released && framesRendered >= releaseFrame) {
-            for (int note : args.notes) {
-                queueOrWarn(engine, {daw::CommandType::NoteOff, 0.0f, note}, "note off");
+        if (args.arpSteps == 0 && !released && framesRendered >= releaseFrame) {
+            for (std::size_t n = 0; n < args.notes.size(); ++n) {
+                const auto track = static_cast<std::uint8_t>(n % args.numTracks);
+                queueOrWarn(engine, {daw::CommandType::NoteOff, 0.0f, args.notes[n], track, 0}, "note off");
             }
             released = true;
         }
@@ -188,11 +248,11 @@ int main(int argc, char** argv) {
         const double p99 = blockTimesUs[static_cast<std::size_t>(blockTimesUs.size() * 0.99)];
         const double maxUs = blockTimesUs.back();
         const double budgetUs = (static_cast<double>(kBlockSize) / kSampleRate) * 1'000'000.0;
-        std::printf("voices=%zu blocks=%zu p50=%.2fus p99=%.2fus max=%.2fus budget=%.2fus\n",
-                    args.notes.size(), blockTimesUs.size(), p50, p99, maxUs, budgetUs);
+        std::printf("tracks=%zu nodes=%zu blocks=%zu p50=%.2fus p99=%.2fus max=%.2fus budget=%.2fus\n",
+                    args.numTracks, engine.graph().numNodes(), blockTimesUs.size(), p50, p99, maxUs, budgetUs);
     }
 
-    std::printf("wrote %s (%zu frames, %.2fs, %zu note(s))\n",
-                args.outputPath.c_str(), totalFrames, args.seconds, args.notes.size());
+    std::printf("wrote %s (%zu frames, %.2fs, %zu track(s), %zu note(s))\n",
+                args.outputPath.c_str(), totalFrames, args.seconds, args.numTracks, args.notes.size());
     return 0;
 }

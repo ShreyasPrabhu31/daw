@@ -5,9 +5,18 @@
 // Buffers are static, not heap-allocated, so daw_render can run on the audio
 // thread without a single malloc.
 //
-// Every setter goes through the engine's command queue rather than touching
-// the synth directly, because these are called from the worklet's message
-// handler, which is not the same context as the render callback.
+// Threading note. In an AudioWorklet the port's message handler and process()
+// both run in the audio rendering thread, interleaved rather than concurrent.
+// That makes parameter setters safe to call directly, but it also means a
+// graph edit here would run where blocking is forbidden, and Graph::rebuild
+// may wait for the audio thread to release a plan slot. So every track is
+// created inside daw_init, before any rendering starts, and the topology is
+// never touched again from the browser.
+//
+// Timestamps cross the boundary as double rather than i64 deliberately: a
+// standalone module with no glue would otherwise force BigInt on every call,
+// and a double holds an exact integer sample count for about 5700 years at
+// 48 kHz.
 extern "C" {
 
 constexpr std::size_t kMaxBlockFrames = 1024;
@@ -18,96 +27,200 @@ static float gLeft[kMaxBlockFrames];
 static float gRight[kMaxBlockFrames];
 static float* gChannels[kNumChannels] = {gLeft, gRight};
 
-static void push(daw::CommandType type, float floatValue, std::int32_t intValue) {
+static void push(daw::CommandType type, float floatValue, std::int32_t intValue, int track) {
+    daw::EngineCommand command{};
+    command.type = type;
+    command.floatValue = floatValue;
+    command.intValue = intValue;
+    command.track = static_cast<std::uint8_t>(track < 0 ? 0 : track);
     // A dropped command means the queue is full, which at UI rates means
-    // something upstream is spamming; losing one parameter update is the
-    // right failure mode versus blocking the caller.
-    (void)gEngine.pushCommand({type, floatValue, intValue});
+    // something upstream is spamming; losing one update beats blocking.
+    (void)gEngine.pushCommand(command);
+}
+
+static void pushAt(daw::CommandType type, float floatValue, std::int32_t intValue, int track, double time) {
+    daw::EngineCommand command{};
+    command.type = type;
+    command.floatValue = floatValue;
+    command.intValue = intValue;
+    command.track = static_cast<std::uint8_t>(track < 0 ? 0 : track);
+    command.scheduled = true;
+    command.time = time < 0.0 ? 0 : static_cast<std::uint64_t>(time);
+    (void)gEngine.pushCommand(command);
 }
 
 __attribute__((export_name("daw_init")))
-void daw_init(double sampleRate) {
-    gEngine.prepare(sampleRate, kMaxBlockFrames);
+int daw_init(double sampleRate, int numTracks) {
+    gEngine.prepare(sampleRate, kMaxBlockFrames, kNumChannels);
+
+    int created = 0;
+    for (int i = 0; i < numTracks; ++i) {
+        if (gEngine.addTrack() == daw::Engine::kMaxTracks) break;
+        ++created;
+    }
+    return created;
 }
 
 // Lets the worklet build Float32Array views directly over wasm linear
-// memory once, instead of copying samples across the JS/WASM boundary
-// every block.
+// memory once, instead of copying samples across the boundary every block.
 __attribute__((export_name("daw_get_channel_ptr")))
 float* daw_get_channel_ptr(int channel) {
     return gChannels[static_cast<std::size_t>(channel)];
 }
 
 __attribute__((export_name("daw_note_on")))
-void daw_note_on(int midiNote, float velocity) {
-    push(daw::CommandType::NoteOn, velocity, midiNote);
+void daw_note_on(int track, int midiNote, float velocity) {
+    push(daw::CommandType::NoteOn, velocity, midiNote, track);
 }
 
 __attribute__((export_name("daw_note_off")))
-void daw_note_off(int midiNote) {
-    push(daw::CommandType::NoteOff, 0.0f, midiNote);
+void daw_note_off(int track, int midiNote) {
+    push(daw::CommandType::NoteOff, 0.0f, midiNote, track);
 }
 
 __attribute__((export_name("daw_all_notes_off")))
 void daw_all_notes_off() {
-    push(daw::CommandType::AllNotesOff, 0.0f, 0);
+    push(daw::CommandType::AllNotesOff, 0.0f, 0, 0);
+}
+
+__attribute__((export_name("daw_schedule_note_on")))
+void daw_schedule_note_on(int track, int midiNote, float velocity, double timeSamples) {
+    pushAt(daw::CommandType::NoteOn, velocity, midiNote, track, timeSamples);
+}
+
+__attribute__((export_name("daw_schedule_note_off")))
+void daw_schedule_note_off(int track, int midiNote, double timeSamples) {
+    pushAt(daw::CommandType::NoteOff, 0.0f, midiNote, track, timeSamples);
+}
+
+__attribute__((export_name("daw_clear_scheduled_events")))
+void daw_clear_scheduled_events() {
+    push(daw::CommandType::ClearScheduledEvents, 0.0f, 0, 0);
 }
 
 __attribute__((export_name("daw_set_waveform")))
-void daw_set_waveform(int waveform) {
-    push(daw::CommandType::SetWaveform, 0.0f, waveform);
+void daw_set_waveform(int track, int waveform) {
+    push(daw::CommandType::SetWaveform, 0.0f, waveform, track);
+}
+
+__attribute__((export_name("daw_set_attack")))
+void daw_set_attack(int track, float milliseconds) {
+    push(daw::CommandType::SetAttack, milliseconds, 0, track);
+}
+
+__attribute__((export_name("daw_set_decay")))
+void daw_set_decay(int track, float milliseconds) {
+    push(daw::CommandType::SetDecay, milliseconds, 0, track);
+}
+
+__attribute__((export_name("daw_set_sustain")))
+void daw_set_sustain(int track, float level) {
+    push(daw::CommandType::SetSustain, level, 0, track);
+}
+
+__attribute__((export_name("daw_set_release")))
+void daw_set_release(int track, float milliseconds) {
+    push(daw::CommandType::SetRelease, milliseconds, 0, track);
+}
+
+__attribute__((export_name("daw_set_filter_type")))
+void daw_set_filter_type(int track, int type) {
+    push(daw::CommandType::SetFilterType, 0.0f, type, track);
+}
+
+__attribute__((export_name("daw_set_filter_cutoff")))
+void daw_set_filter_cutoff(int track, float hz) {
+    push(daw::CommandType::SetFilterCutoff, hz, 0, track);
+}
+
+__attribute__((export_name("daw_set_filter_resonance")))
+void daw_set_filter_resonance(int track, float q) {
+    push(daw::CommandType::SetFilterResonance, q, 0, track);
+}
+
+__attribute__((export_name("daw_set_track_gain")))
+void daw_set_track_gain(int track, float gain) {
+    push(daw::CommandType::SetTrackGain, gain, 0, track);
+}
+
+__attribute__((export_name("daw_set_track_pan")))
+void daw_set_track_pan(int track, float pan) {
+    push(daw::CommandType::SetTrackPan, pan, 0, track);
+}
+
+__attribute__((export_name("daw_set_track_mute")))
+void daw_set_track_mute(int track, int muted) {
+    push(daw::CommandType::SetTrackMute, 0.0f, muted, track);
+}
+
+__attribute__((export_name("daw_set_track_solo")))
+void daw_set_track_solo(int track, int soloed) {
+    push(daw::CommandType::SetTrackSolo, 0.0f, soloed, track);
 }
 
 __attribute__((export_name("daw_set_master_gain")))
 void daw_set_master_gain(float gain) {
-    push(daw::CommandType::SetMasterGain, gain, 0);
+    push(daw::CommandType::SetMasterGain, gain, 0, 0);
 }
 
-__attribute__((export_name("daw_set_attack")))
-void daw_set_attack(float milliseconds) {
-    push(daw::CommandType::SetAttack, milliseconds, 0);
+__attribute__((export_name("daw_set_master_saturation")))
+void daw_set_master_saturation(int enabled) {
+    push(daw::CommandType::SetMasterSaturation, 0.0f, enabled, 0);
 }
 
-__attribute__((export_name("daw_set_decay")))
-void daw_set_decay(float milliseconds) {
-    push(daw::CommandType::SetDecay, milliseconds, 0);
+__attribute__((export_name("daw_transport_play")))
+void daw_transport_play() {
+    push(daw::CommandType::TransportPlay, 0.0f, 0, 0);
 }
 
-__attribute__((export_name("daw_set_sustain")))
-void daw_set_sustain(float level) {
-    push(daw::CommandType::SetSustain, level, 0);
+__attribute__((export_name("daw_transport_stop")))
+void daw_transport_stop() {
+    push(daw::CommandType::TransportStop, 0.0f, 0, 0);
 }
 
-__attribute__((export_name("daw_set_release")))
-void daw_set_release(float milliseconds) {
-    push(daw::CommandType::SetRelease, milliseconds, 0);
+__attribute__((export_name("daw_transport_set_position")))
+void daw_transport_set_position(double samples) {
+    push(daw::CommandType::TransportSetPosition, 0.0f, static_cast<std::int32_t>(samples), 0);
 }
 
-__attribute__((export_name("daw_set_filter_type")))
-void daw_set_filter_type(int type) {
-    push(daw::CommandType::SetFilterType, 0.0f, type);
+__attribute__((export_name("daw_transport_set_loop")))
+void daw_transport_set_loop(int enabled) {
+    push(daw::CommandType::TransportSetLoop, 0.0f, enabled, 0);
 }
 
-__attribute__((export_name("daw_set_filter_cutoff")))
-void daw_set_filter_cutoff(float hz) {
-    push(daw::CommandType::SetFilterCutoff, hz, 0);
+// Loop bounds go straight to the transport rather than through the queue:
+// they are only ever set from daw_init or a stopped transport, and they must
+// be in place before the enable command takes effect.
+__attribute__((export_name("daw_set_loop_range")))
+void daw_set_loop_range(double startSamples, double endSamples) {
+    gEngine.transport().setLoop(static_cast<std::uint64_t>(startSamples),
+                                static_cast<std::uint64_t>(endSamples));
 }
 
-__attribute__((export_name("daw_set_filter_resonance")))
-void daw_set_filter_resonance(float q) {
-    push(daw::CommandType::SetFilterResonance, q, 0);
+__attribute__((export_name("daw_transport_position")))
+double daw_transport_position() {
+    return static_cast<double>(gEngine.transport().position());
 }
 
-// Lets the UI show how many voices the pool is actually using, which is the
-// only way to see voice stealing happen from outside the engine.
+__attribute__((export_name("daw_transport_is_playing")))
+int daw_transport_is_playing() {
+    return gEngine.transport().isPlaying() ? 1 : 0;
+}
+
 __attribute__((export_name("daw_active_voice_count")))
-int daw_active_voice_count() {
-    return static_cast<int>(gEngine.synth().activeVoiceCount());
+int daw_active_voice_count(int track) {
+    if (track < 0 || static_cast<std::size_t>(track) >= gEngine.numTracks()) return 0;
+    return static_cast<int>(gEngine.track(static_cast<std::size_t>(track)).synth().activeVoiceCount());
 }
 
 __attribute__((export_name("daw_peak_level")))
 float daw_peak_level() {
     return gEngine.peakLevel();
+}
+
+__attribute__((export_name("daw_num_tracks")))
+int daw_num_tracks() {
+    return static_cast<int>(gEngine.numTracks());
 }
 
 __attribute__((export_name("daw_render")))
