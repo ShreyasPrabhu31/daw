@@ -29,11 +29,15 @@ Core pieces, all under `engine/`:
 
 - `AudioBuffer` non-owning planar view over host-owned memory
 - `Node` abstract base, `prepare()` on the message thread, `process()` on audio
-- `Engine` owns nodes, drains commands, renders, meters, clamps
+- `Engine` owns the synth and nodes, drains commands, renders, meters, clamps
 - `Transport` sample position, tempo, loop points
 - `RingBuffer<T, N>` wait-free SPSC queue, power-of-two capacity, acquire/release
 - `ParameterSmoother` one-pole ramp, prevents zipper noise on knob moves
 - `Oscillator` PolyBLEP sine/saw/square
+- `ADSR` linear-segment envelope, exact termination so voices free reliably
+- `Biquad` RBJ cookbook low/high/band pass, transposed direct form II
+- `Voice` oscillator into filter into envelope, sums into the block
+- `Synth` fixed pool of 8 voices, MIDI frequency table, voice stealing
 
 ## The rule that governs everything
 
@@ -54,27 +58,37 @@ Consequences to enforce in every review:
 - Nodes are added only before rendering starts; `nodes_` is never resized on the
   audio thread
 
-## Current state: Phase 0 complete
+## Current state: Phase 1 complete
 
-A single oscillator rendering in the browser and to disk. Verified: builds
-clean, 38 checks passing, clean under ASan, UBSan, and TSan. The WASM path
-has been run end to end in a real browser (fetch on the main thread, transfer
-to the worklet, `_initialize` then `daw_init`, live parameter changes via
-`daw_set_frequency`/`daw_set_waveform`/`daw_set_gain`) with no console errors.
+An 8-voice polyphonic synth playable in the browser and renderable to disk.
+Verified: builds clean, 96 checks passing, clean under ASan, UBSan, and TSan.
+
+The browser path has been driven end to end: nine held keys produce eight
+voices (stealing works and the pool never grows), releasing frees every
+voice, all-notes-off clears a stuck chord, and the console stays empty.
 
 Local timings on a shared VM (a floor, not a result, re-measure on real
-hardware): p50 2.21 us, p99 2.29 us, max 2.96 us, budget 2666.67 us.
+hardware), native render path with 8 voices sounding:
+p50 12.08 us, p99 25.75 us, max 63.08 us, budget 2666.67 us.
 
-Known gap: the browser run above only proves the wiring — nobody has listened
-to the output yet or measured worklet block times from inside the browser
-(the CLI numbers above are the native render path, not the worklet). That is
-the next thing to verify before trusting this under real playback.
+Known gaps, in the order they matter:
+
+- Nobody has listened to the output yet. Every claim above is structural.
+- Worklet block times have never been measured from inside the browser. The
+  numbers above are the native path; the WASM path is not the same code path.
+- Eight voices at full velocity hit the output clamp at the default master
+  gain (peak lands on exactly 1.0), so a dense chord distorts. The clamp is a
+  safety net, not a mix decision. The real fix is a master bus with a soft
+  limiter, which belongs with the bus work in Phase 2.
+- Web MIDI has only been exercised with no device attached, where it
+  correctly reports unavailable. The note-on and note-off decoding path has
+  never seen real controller traffic.
 
 ## Layout
 
 ```
 engine/include/daw/   headers, the portable core
-engine/src/           Oscillator.cpp, Engine.cpp
+engine/src/           Engine.cpp, Oscillator.cpp, Synth.cpp, Voice.cpp
 cli/                  offline WAV renderer + benchmark harness
 wasm/                 Emscripten bindings and build.sh
 web/                  worklet.js, index.html test bench, _headers
@@ -89,10 +103,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 
-./build/daw_render out.wav --seconds 2 --freq 220 --wave saw
+# A single note, then a chord. Repeat --note for polyphony.
+./build/cli/daw_render out.wav --seconds 2 --note 69 --wave saw
+./build/cli/daw_render chord.wav --seconds 3 --note 60 --note 64 --note 67 \
+    --wave saw --cutoff 2500 --benchmark
 
 cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DDAW_TSAN=ON
-cmake --build build-tsan -j && ./build-tsan/daw_tests
+cmake --build build-tsan -j && ./build-tsan/tests/daw_tests
 
 ./wasm/build.sh                      # needs emsdk on PATH
 cd web && python3 -m http.server 8080
@@ -119,13 +136,21 @@ consumer (this is the test TSan needs to prove the memory ordering), silence
 before `prepare()`, sine frequency accuracy via zero-crossing count, stereo
 mirroring, output clamping, variable block sizes, and graceful queue overflow.
 
+Phase 1 added: envelope stage transitions and exact release termination,
+release time staying constant regardless of the level it started from,
+percussive (zero sustain) patches freeing their voice, filter magnitude
+response per type, filter stability at out-of-range cutoff and resonance,
+voices summing rather than overwriting, full polyphony, stealing preferring a
+releasing voice over a held one, note off hitting only the matching note, and
+MIDI note 69 sounding at 440 Hz.
+
 Add to this file rather than starting a new framework, unless the suite outgrows
 it, in which case move to Catch2.
 
 ## Roadmap
 
-- **Phase 1** ADSR envelope, biquad filter, `Voice` class, 8-voice polyphony
-  with a preallocated pool and voice stealing, Web MIDI input
+- **Phase 1** (done) ADSR envelope, biquad filter, `Voice` class, 8-voice
+  polyphony with a preallocated pool and voice stealing, Web MIDI input
 - **Phase 2** node graph with topological sort computed on the message thread
   and walked as a flat array on the audio thread, multiple tracks into a master
   bus, sample-accurate event scheduling, play/stop/loop
