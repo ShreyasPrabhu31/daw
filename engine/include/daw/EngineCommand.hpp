@@ -8,9 +8,18 @@ namespace daw {
 // RingBuffer for the audio thread to apply. No pointers, no dynamic size:
 // the audio thread must be able to copy this without touching the heap.
 enum class CommandType : std::uint8_t {
-    SetFrequency,
-    SetWaveform,
-    SetGain,
+    NoteOn,  // intValue = MIDI note, floatValue = velocity
+    NoteOff, // intValue = MIDI note
+    AllNotesOff,
+    SetWaveform, // intValue = Waveform
+    SetMasterGain,
+    SetAttack,  // milliseconds
+    SetDecay,   // milliseconds
+    SetSustain, // linear level, 0 to 1
+    SetRelease, // milliseconds
+    SetFilterType, // intValue = Biquad::Type
+    SetFilterCutoff,
+    SetFilterResonance,
     TransportPlay,
     TransportStop,
 };

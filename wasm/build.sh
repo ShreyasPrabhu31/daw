@@ -18,6 +18,8 @@ mkdir -p "$OUT_DIR"
 em++ \
     "$ROOT_DIR/engine/src/Engine.cpp" \
     "$ROOT_DIR/engine/src/Oscillator.cpp" \
+    "$ROOT_DIR/engine/src/Synth.cpp" \
+    "$ROOT_DIR/engine/src/Voice.cpp" \
     "$SCRIPT_DIR/bindings.cpp" \
     -I "$ROOT_DIR/engine/include" \
     -std=c++20 \
@@ -26,7 +28,7 @@ em++ \
     --no-entry \
     -sALLOW_MEMORY_GROWTH=0 \
     -sINITIAL_MEMORY=16MB \
-    -sEXPORTED_FUNCTIONS=_daw_init,_daw_get_channel_ptr,_daw_set_frequency,_daw_set_waveform,_daw_set_gain,_daw_render \
+    -sEXPORTED_FUNCTIONS=_daw_init,_daw_get_channel_ptr,_daw_note_on,_daw_note_off,_daw_all_notes_off,_daw_set_waveform,_daw_set_master_gain,_daw_set_attack,_daw_set_decay,_daw_set_sustain,_daw_set_release,_daw_set_filter_type,_daw_set_filter_cutoff,_daw_set_filter_resonance,_daw_active_voice_count,_daw_peak_level,_daw_render \
     -o "$OUT_DIR/engine.wasm"
 
 echo "wrote $OUT_DIR/engine.wasm"

@@ -15,6 +15,8 @@ option(DAW_TSAN "Build with ThreadSanitizer" OFF)
 add_library(daw_engine STATIC
     engine/src/Engine.cpp
     engine/src/Oscillator.cpp
+    engine/src/Synth.cpp
+    engine/src/Voice.cpp
 )
 target_include_directories(daw_engine PUBLIC engine/include)
 target_compile_options(daw_engine PUBLIC -Wall -Wextra -Wpedantic -Wshadow -Werror)

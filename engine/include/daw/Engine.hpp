@@ -7,16 +7,16 @@
 #include "daw/AudioBuffer.hpp"
 #include "daw/EngineCommand.hpp"
 #include "daw/Node.hpp"
-#include "daw/Oscillator.hpp"
 #include "daw/RingBuffer.hpp"
+#include "daw/Synth.hpp"
 #include "daw/Transport.hpp"
 
 namespace daw {
 
-// Owns the built-in oscillator plus an optional chain of effect Nodes,
-// drains queued commands, renders, meters, and clamps. render() is the only
-// method called from the audio thread; everything else runs on the message
-// thread before rendering starts.
+// Owns the synth plus an optional chain of effect Nodes, drains queued
+// commands, renders, meters, and clamps. render() is the only method called
+// from the audio thread; everything else runs on the message thread before
+// rendering starts.
 class Engine {
 public:
     static constexpr std::size_t kMaxNodes = 32;
@@ -31,12 +31,12 @@ public:
     [[nodiscard]] bool pushCommand(const EngineCommand& command) noexcept;
 
     // Audio thread. Drains queued commands once at the start of the block,
-    // renders the oscillator and effect chain, then clamps and meters.
+    // renders the synth and effect chain, then clamps and meters.
     void render(AudioBuffer& buffer) noexcept;
 
     [[nodiscard]] float peakLevel() const noexcept { return peakLevel_.load(std::memory_order_relaxed); }
 
-    [[nodiscard]] Oscillator& oscillator() noexcept { return oscillator_; }
+    [[nodiscard]] Synth& synth() noexcept { return synth_; }
     [[nodiscard]] Transport& transport() noexcept { return transport_; }
 
 private:
@@ -46,7 +46,7 @@ private:
     std::array<Node*, kMaxNodes> nodes_{};
     std::size_t numNodes_ = 0;
 
-    Oscillator oscillator_;
+    Synth synth_;
     Transport transport_;
 
     RingBuffer<EngineCommand, kCommandQueueCapacity> commandQueue_;

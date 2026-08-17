@@ -24,6 +24,14 @@ void Oscillator::setGain(float gain) noexcept {
     gainSmoother_.setTarget(gain);
 }
 
+void Oscillator::setFrequencyImmediate(float hz) noexcept {
+    freqSmoother_.reset(hz);
+}
+
+void Oscillator::setGainImmediate(float gain) noexcept {
+    gainSmoother_.reset(gain);
+}
+
 // Bandlimited step correction applied at the discontinuity of a naive saw or
 // square wave, evaluated over a window of one sample period on either side
 // of the discontinuity.

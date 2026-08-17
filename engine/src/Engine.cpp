@@ -6,7 +6,7 @@
 namespace daw {
 
 void Engine::prepare(double sampleRate, std::size_t maxBlockSize) {
-    oscillator_.prepare(sampleRate, maxBlockSize);
+    synth_.prepare(sampleRate, maxBlockSize);
     transport_.prepare(sampleRate);
     prepared_ = true;
 }
@@ -22,15 +22,50 @@ bool Engine::pushCommand(const EngineCommand& command) noexcept {
 }
 
 void Engine::applyCommand(const EngineCommand& command) noexcept {
+    // The envelope is set as a whole struct, so a single-field change reads
+    // the current parameters back out of the synth and rewrites one member.
+    ADSR::Parameters envelope = synth_.envelopeParameters();
+
     switch (command.type) {
-        case CommandType::SetFrequency:
-            oscillator_.setFrequency(command.floatValue);
+        case CommandType::NoteOn:
+            synth_.noteOn(command.intValue, command.floatValue);
+            break;
+        case CommandType::NoteOff:
+            synth_.noteOff(command.intValue);
+            break;
+        case CommandType::AllNotesOff:
+            synth_.allNotesOff();
             break;
         case CommandType::SetWaveform:
-            oscillator_.setWaveform(static_cast<Waveform>(command.intValue));
+            synth_.setWaveform(static_cast<Waveform>(command.intValue));
             break;
-        case CommandType::SetGain:
-            oscillator_.setGain(command.floatValue);
+        case CommandType::SetMasterGain:
+            synth_.setMasterGain(command.floatValue);
+            break;
+        case CommandType::SetAttack:
+            envelope.attackMs = command.floatValue;
+            synth_.setEnvelopeParameters(envelope);
+            break;
+        case CommandType::SetDecay:
+            envelope.decayMs = command.floatValue;
+            synth_.setEnvelopeParameters(envelope);
+            break;
+        case CommandType::SetSustain:
+            envelope.sustain = command.floatValue;
+            synth_.setEnvelopeParameters(envelope);
+            break;
+        case CommandType::SetRelease:
+            envelope.releaseMs = command.floatValue;
+            synth_.setEnvelopeParameters(envelope);
+            break;
+        case CommandType::SetFilterType:
+            synth_.setFilterType(static_cast<Biquad::Type>(command.intValue));
+            break;
+        case CommandType::SetFilterCutoff:
+            synth_.setFilterCutoff(command.floatValue);
+            break;
+        case CommandType::SetFilterResonance:
+            synth_.setFilterResonance(command.floatValue);
             break;
         case CommandType::TransportPlay:
             transport_.play();
@@ -55,7 +90,7 @@ void Engine::render(AudioBuffer& buffer) noexcept {
 
     drainCommands();
 
-    oscillator_.process(buffer);
+    synth_.process(buffer);
     for (std::size_t i = 0; i < numNodes_; ++i) {
         nodes_[i]->process(buffer);
     }

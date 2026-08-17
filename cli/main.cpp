@@ -1,6 +1,6 @@
 #include "daw/AudioBuffer.hpp"
 #include "daw/Engine.hpp"
-#include "daw/Oscillator.hpp"
+#include "daw/Synth.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -15,15 +15,25 @@ namespace {
 struct Args {
     std::string outputPath = "out.wav";
     double seconds = 2.0;
-    float frequency = 440.0f;
-    std::string wave = "sine";
+    std::vector<int> notes;
+    float velocity = 0.9f;
+    std::string wave = "saw";
+    float attackMs = 5.0f;
+    float decayMs = 120.0f;
+    float sustain = 0.7f;
+    float releaseMs = 250.0f;
+    float cutoffHz = 4000.0f;
+    float resonance = 0.9f;
+    // Fraction of the render at which the keys are lifted, so the file
+    // captures the release tail instead of being cut off mid-sustain.
+    double holdFraction = 0.6;
     bool benchmark = false;
 };
 
-daw::Waveform parseWaveform(const std::string& s) {
-    if (s == "saw") return daw::Waveform::Saw;
-    if (s == "square") return daw::Waveform::Square;
-    return daw::Waveform::Sine;
+int parseWaveform(const std::string& s) {
+    if (s == "saw") return 1;
+    if (s == "square") return 2;
+    return 0; // sine
 }
 
 bool writeWavFile(const std::string& path, const std::vector<float>& interleaved,
@@ -65,24 +75,50 @@ bool writeWavFile(const std::string& path, const std::vector<float>& interleaved
     return true;
 }
 
+void queueOrWarn(daw::Engine& engine, const daw::EngineCommand& command, const char* what) {
+    if (!engine.pushCommand(command)) {
+        std::fprintf(stderr, "warning: could not queue %s\n", what);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     Args args;
-    if (argc > 1) args.outputPath = argv[1];
+    if (argc > 1 && argv[1][0] != '-') args.outputPath = argv[1];
 
-    for (int i = 2; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--seconds" && i + 1 < argc) {
+        const bool hasValue = i + 1 < argc;
+        if (arg == "--seconds" && hasValue) {
             args.seconds = std::stod(argv[++i]);
-        } else if (arg == "--freq" && i + 1 < argc) {
-            args.frequency = std::stof(argv[++i]);
-        } else if (arg == "--wave" && i + 1 < argc) {
+        } else if (arg == "--note" && hasValue) {
+            args.notes.push_back(std::stoi(argv[++i]));
+        } else if (arg == "--velocity" && hasValue) {
+            args.velocity = std::stof(argv[++i]);
+        } else if (arg == "--wave" && hasValue) {
             args.wave = argv[++i];
+        } else if (arg == "--attack" && hasValue) {
+            args.attackMs = std::stof(argv[++i]);
+        } else if (arg == "--decay" && hasValue) {
+            args.decayMs = std::stof(argv[++i]);
+        } else if (arg == "--sustain" && hasValue) {
+            args.sustain = std::stof(argv[++i]);
+        } else if (arg == "--release" && hasValue) {
+            args.releaseMs = std::stof(argv[++i]);
+        } else if (arg == "--cutoff" && hasValue) {
+            args.cutoffHz = std::stof(argv[++i]);
+        } else if (arg == "--resonance" && hasValue) {
+            args.resonance = std::stof(argv[++i]);
+        } else if (arg == "--hold" && hasValue) {
+            args.holdFraction = std::stod(argv[++i]);
         } else if (arg == "--benchmark") {
             args.benchmark = true;
         }
     }
+
+    // A bare invocation should still make a sound: default to a single A440.
+    if (args.notes.empty()) args.notes.push_back(69);
 
     constexpr double kSampleRate = 48000.0;
     constexpr std::size_t kBlockSize = 128;
@@ -90,14 +126,21 @@ int main(int argc, char** argv) {
 
     daw::Engine engine;
     engine.prepare(kSampleRate, kBlockSize);
-    engine.oscillator().setWaveform(parseWaveform(args.wave));
-    const bool queuedFrequency = engine.pushCommand({daw::CommandType::SetFrequency, args.frequency, 0});
-    const bool queuedGain = engine.pushCommand({daw::CommandType::SetGain, 0.8f, 0});
-    if (!queuedFrequency || !queuedGain) {
-        std::fprintf(stderr, "warning: initial command queue push failed\n");
+
+    queueOrWarn(engine, {daw::CommandType::SetWaveform, 0.0f, parseWaveform(args.wave)}, "waveform");
+    queueOrWarn(engine, {daw::CommandType::SetAttack, args.attackMs, 0}, "attack");
+    queueOrWarn(engine, {daw::CommandType::SetDecay, args.decayMs, 0}, "decay");
+    queueOrWarn(engine, {daw::CommandType::SetSustain, args.sustain, 0}, "sustain");
+    queueOrWarn(engine, {daw::CommandType::SetRelease, args.releaseMs, 0}, "release");
+    queueOrWarn(engine, {daw::CommandType::SetFilterCutoff, args.cutoffHz, 0}, "cutoff");
+    queueOrWarn(engine, {daw::CommandType::SetFilterResonance, args.resonance, 0}, "resonance");
+
+    for (int note : args.notes) {
+        queueOrWarn(engine, {daw::CommandType::NoteOn, args.velocity, note}, "note on");
     }
 
     const std::size_t totalFrames = static_cast<std::size_t>(args.seconds * kSampleRate);
+    const std::size_t releaseFrame = static_cast<std::size_t>(static_cast<double>(totalFrames) * args.holdFraction);
 
     std::vector<float> left(kBlockSize), right(kBlockSize);
     float* channelPtrs[kNumChannels] = {left.data(), right.data()};
@@ -109,7 +152,15 @@ int main(int argc, char** argv) {
     blockTimesUs.reserve((totalFrames / kBlockSize) + 1);
 
     std::size_t framesRendered = 0;
+    bool released = false;
     while (framesRendered < totalFrames) {
+        if (!released && framesRendered >= releaseFrame) {
+            for (int note : args.notes) {
+                queueOrWarn(engine, {daw::CommandType::NoteOff, 0.0f, note}, "note off");
+            }
+            released = true;
+        }
+
         const std::size_t framesThisBlock = std::min(kBlockSize, totalFrames - framesRendered);
         daw::AudioBuffer blockView(channelPtrs, kNumChannels, framesThisBlock);
 
@@ -125,8 +176,11 @@ int main(int argc, char** argv) {
         framesRendered += framesThisBlock;
     }
 
-    writeWavFile(args.outputPath, interleaved, static_cast<std::uint32_t>(kNumChannels),
-                 static_cast<std::uint32_t>(kSampleRate));
+    if (!writeWavFile(args.outputPath, interleaved, static_cast<std::uint32_t>(kNumChannels),
+                      static_cast<std::uint32_t>(kSampleRate))) {
+        std::fprintf(stderr, "error: could not write %s\n", args.outputPath.c_str());
+        return 1;
+    }
 
     if (args.benchmark && !blockTimesUs.empty()) {
         std::sort(blockTimesUs.begin(), blockTimesUs.end());
@@ -134,10 +188,11 @@ int main(int argc, char** argv) {
         const double p99 = blockTimesUs[static_cast<std::size_t>(blockTimesUs.size() * 0.99)];
         const double maxUs = blockTimesUs.back();
         const double budgetUs = (static_cast<double>(kBlockSize) / kSampleRate) * 1'000'000.0;
-        std::printf("blocks=%zu p50=%.2fus p99=%.2fus max=%.2fus budget=%.2fus\n",
-                    blockTimesUs.size(), p50, p99, maxUs, budgetUs);
+        std::printf("voices=%zu blocks=%zu p50=%.2fus p99=%.2fus max=%.2fus budget=%.2fus\n",
+                    args.notes.size(), blockTimesUs.size(), p50, p99, maxUs, budgetUs);
     }
 
-    std::printf("wrote %s (%zu frames, %.2fs)\n", args.outputPath.c_str(), totalFrames, args.seconds);
+    std::printf("wrote %s (%zu frames, %.2fs, %zu note(s))\n",
+                args.outputPath.c_str(), totalFrames, args.seconds, args.notes.size());
     return 0;
 }
