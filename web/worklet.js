@@ -8,17 +8,39 @@ class DawProcessor extends AudioWorkletProcessor {
     this.leftView = null;
     this.rightView = null;
     this.maxBlockFrames = 1024;
+    this.blocksSinceReport = 0;
+
+    // Message name to wasm export. Everything here ends up on the engine's
+    // command queue, so none of it touches the synth mid-block.
+    this.setters = {
+      setWaveform: 'daw_set_waveform',
+      setMasterGain: 'daw_set_master_gain',
+      setAttack: 'daw_set_attack',
+      setDecay: 'daw_set_decay',
+      setSustain: 'daw_set_sustain',
+      setRelease: 'daw_set_release',
+      setFilterType: 'daw_set_filter_type',
+      setFilterCutoff: 'daw_set_filter_cutoff',
+      setFilterResonance: 'daw_set_filter_resonance',
+    };
 
     this.port.onmessage = (event) => {
       const { type } = event.data;
+
       if (type === 'init') {
         this._init(event.data.wasmBytes);
-      } else if (type === 'setFrequency') {
-        if (this.exports) this.exports.daw_set_frequency(event.data.value);
-      } else if (type === 'setWaveform') {
-        if (this.exports) this.exports.daw_set_waveform(event.data.value);
-      } else if (type === 'setGain') {
-        if (this.exports) this.exports.daw_set_gain(event.data.value);
+        return;
+      }
+      if (!this.exports) return;
+
+      if (type === 'noteOn') {
+        this.exports.daw_note_on(event.data.note, event.data.velocity);
+      } else if (type === 'noteOff') {
+        this.exports.daw_note_off(event.data.note);
+      } else if (type === 'allNotesOff') {
+        this.exports.daw_all_notes_off();
+      } else if (this.setters[type]) {
+        this.exports[this.setters[type]](event.data.value);
       }
     };
   }
@@ -63,6 +85,17 @@ class DawProcessor extends AudioWorkletProcessor {
     output[0].set(this.leftView.subarray(0, numFrames));
     if (output.length > 1) {
       output[1].set(this.rightView.subarray(0, numFrames));
+    }
+
+    // Meter roughly 20 times a second. Posting every block would flood the
+    // main thread with messages it cannot paint anywhere near that fast.
+    if (++this.blocksSinceReport >= 16) {
+      this.blocksSinceReport = 0;
+      this.port.postMessage({
+        type: 'meter',
+        voices: this.exports.daw_active_voice_count(),
+        peak: this.exports.daw_peak_level(),
+      });
     }
 
     return true;
