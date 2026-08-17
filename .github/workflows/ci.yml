@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (ASan + UBSan)
+        if: matrix.sanitizer == 'asan'
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DDAW_ASAN=ON
+
+      - name: Build (ASan + UBSan)
+        if: matrix.sanitizer == 'asan'
+        run: cmake --build build-asan -j
+
+      - name: Test (ASan + UBSan)
+        if: matrix.sanitizer == 'asan'
+        run: ctest --test-dir build-asan --output-on-failure
+
+      - name: Configure (TSan)
+        if: matrix.sanitizer == 'tsan'
+        run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DDAW_TSAN=ON
+
+      - name: Build (TSan)
+        if: matrix.sanitizer == 'tsan'
+        run: cmake --build build-tsan -j
+
+      - name: Test (TSan)
+        if: matrix.sanitizer == 'tsan'
+        run: ctest --test-dir build-tsan --output-on-failure

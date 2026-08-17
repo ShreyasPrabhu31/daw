@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>DAW engine test bench</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+  label { display: block; margin-top: 16px; font-size: 14px; }
+  input[type="range"] { width: 100%; }
+  button { margin-right: 8px; padding: 6px 16px; font-size: 14px; }
+</style>
+</head>
+<body>
+  <h1>DAW engine test bench</h1>
+  <p>Status: <span id="status">stopped</span></p>
+
+  <button id="play">Play</button>
+  <button id="stop">Stop</button>
+
+  <label>Frequency (Hz)
+    <input id="freq" type="range" min="55" max="1760" value="440" step="1" />
+  </label>
+
+  <label>Waveform
+    <select id="wave">
+      <option value="sine">Sine</option>
+      <option value="saw">Saw</option>
+      <option value="square">Square</option>
+    </select>
+  </label>
+
+  <label>Gain
+    <input id="gain" type="range" min="0" max="1" value="0.8" step="0.01" />
+  </label>
+
+  <script src="main.js"></script>
+</body>
+</html>
