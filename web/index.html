@@ -12,52 +12,35 @@
     --text: #e6e8ec;
     --muted: #9aa1ad;
     --accent: #6ea8fe;
+    --accent-dim: #2c4a7c;
+    --warn: #e5534b;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0;
-    padding: 24px 16px 48px;
-    background: var(--bg);
-    color: var(--text);
+    margin: 0; padding: 24px 16px 48px;
+    background: var(--bg); color: var(--text);
     font: 14px/1.5 system-ui, -apple-system, sans-serif;
   }
-  main { max-width: 760px; margin: 0 auto; }
+  main { max-width: 900px; margin: 0 auto; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
 
-  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; }
   button {
     background: var(--panel); color: var(--text); border: 1px solid var(--line);
     border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer;
   }
   button:hover { border-color: var(--accent); }
+  button.on { background: var(--accent-dim); border-color: var(--accent); }
 
-  .readouts { display: flex; gap: 20px; align-items: center; margin-left: auto; font-size: 13px; }
+  .readouts { display: flex; gap: 18px; align-items: center; margin-left: auto; font-size: 13px; }
   .readouts span { color: var(--muted); }
-  .readouts b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
-
+  .readouts b { font-weight: 600; font-variant-numeric: tabular-nums; }
   .peak { width: 90px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
   #peak-fill { height: 100%; width: 0%; background: var(--accent); transition: width 60ms linear; }
-  #peak-fill.clipping { background: #e5534b; }
+  #peak-fill.clipping { background: var(--warn); }
 
-  /* Keys are laid out in a row; black keys overlay the gap between whites. */
-  #keyboard {
-    position: relative; display: flex; height: 150px; margin-bottom: 24px;
-    user-select: none; touch-action: none;
-  }
-  .key { border-radius: 0 0 4px 4px; cursor: pointer; }
-  .key.white {
-    flex: 1; background: #f2f3f5; border: 1px solid #babec7; border-top: none;
-  }
-  .key.white.held { background: var(--accent); }
-  .key.black {
-    width: 0; height: 62%; background: #23262e; border: 1px solid #0c0e12; border-top: none;
-    margin: 0 -1.6% 0 -1.6%; flex: 0 0 3.2%; z-index: 2; position: relative;
-  }
-  .key.black.held { background: var(--accent); }
-
-  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
-  fieldset { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px 16px 16px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px 16px 16px; margin: 0; }
   legend { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px; }
   label { display: block; margin-top: 12px; font-size: 13px; color: var(--muted); }
   label:first-of-type { margin-top: 0; }
@@ -68,23 +51,116 @@
     width: 100%; margin-top: 4px; padding: 5px; background: var(--bg);
     color: var(--text); border: 1px solid var(--line); border-radius: 5px; font: inherit;
   }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 20px; }
+
+  /* Sequencer: label column plus 16 steps. */
+  #sequencer {
+    display: grid; grid-template-columns: 64px repeat(16, 1fr);
+    gap: 4px; margin-bottom: 18px;
+  }
+  .seq-label { font-size: 12px; color: var(--muted); align-self: center; }
+  .step {
+    aspect-ratio: 1; padding: 0; border-radius: 4px;
+    background: var(--panel); border: 1px solid var(--line);
+  }
+  .step.downbeat { border-color: #3d4350; }
+  .step.on { background: var(--accent); border-color: var(--accent); }
+  .step.playing { outline: 2px solid var(--text); outline-offset: 1px; }
+
+  .mixer { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
+  .strip { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 10px 12px 12px; }
+  .strip h3 { margin: 0 0 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+  .strip .voices { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+  .strip .buttons { display: flex; gap: 6px; margin-top: 10px; }
+  .strip .buttons button { flex: 1; padding: 4px 0; font-size: 12px; }
+
+  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: 18px; }
+
+  #keyboard { position: relative; display: flex; height: 130px; margin-bottom: 18px; user-select: none; touch-action: none; }
+  .key { border-radius: 0 0 4px 4px; cursor: pointer; }
+  .key.white { flex: 1; background: #f2f3f5; border: 1px solid #babec7; border-top: none; }
+  .key.white.held { background: var(--accent); }
+  .key.black {
+    height: 62%; background: #23262e; border: 1px solid #0c0e12; border-top: none;
+    margin: 0 -1.6%; flex: 0 0 3.2%; z-index: 2; position: relative;
+  }
+  .key.black.held { background: var(--accent); }
+
+  .hint { color: var(--muted); font-size: 12px; margin-top: 18px; }
   code { background: var(--panel); padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
 <main>
   <h1>DAW engine test bench</h1>
-  <p class="sub">Phase 1: 8-voice polyphony, ADSR, resonant filter. Click keys, use your computer keyboard, or plug in MIDI.</p>
+  <p class="sub">Phase 2: four tracks through a node graph into a saturating master bus, with sample-accurate scheduling.</p>
 
   <div class="bar">
     <button id="start">Start audio</button>
     <button id="stop">Stop</button>
+    <button id="play">Play loop</button>
+    <button id="pause">Pause</button>
     <button id="panic">All notes off</button>
     <div class="readouts">
       <div><span>status</span> <b id="status">stopped</b></div>
-      <div><span>voices</span> <b id="voices">0 / 8</b></div>
-      <div class="peak" title="peak level"><div id="peak-fill"></div></div>
+      <div class="peak" title="master peak"><div id="peak-fill"></div></div>
+    </div>
+  </div>
+
+  <fieldset style="margin-bottom:18px">
+    <legend>Pattern</legend>
+    <div id="sequencer"></div>
+    <label class="row"><span>Tempo (BPM)</span><b id="bpm-value">110</b></label>
+    <input id="bpm" type="range" min="60" max="180" value="110" step="1" />
+  </fieldset>
+
+  <div class="mixer">
+    <div class="strip">
+      <h3>Bass <span class="voices" id="voices-0">0</span></h3>
+      <label class="row"><span>Gain</span><b id="gain-0-value">0.8</b></label>
+      <input id="gain-0" data-param="setTrackGain" data-track="0" type="range" min="0" max="1.5" value="0.8" step="0.01" />
+      <label class="row"><span>Pan</span><b id="pan-0-value">-0.6</b></label>
+      <input id="pan-0" data-param="setTrackPan" data-track="0" type="range" min="-1" max="1" value="-0.6" step="0.01" />
+      <div class="buttons">
+        <button data-toggle="setTrackMute" data-track="0">Mute</button>
+        <button data-toggle="setTrackSolo" data-track="0">Solo</button>
+        <button class="arm on" data-track="0">Arm</button>
+      </div>
+    </div>
+    <div class="strip">
+      <h3>Tenor <span class="voices" id="voices-1">0</span></h3>
+      <label class="row"><span>Gain</span><b id="gain-1-value">0.8</b></label>
+      <input id="gain-1" data-param="setTrackGain" data-track="1" type="range" min="0" max="1.5" value="0.8" step="0.01" />
+      <label class="row"><span>Pan</span><b id="pan-1-value">-0.2</b></label>
+      <input id="pan-1" data-param="setTrackPan" data-track="1" type="range" min="-1" max="1" value="-0.2" step="0.01" />
+      <div class="buttons">
+        <button data-toggle="setTrackMute" data-track="1">Mute</button>
+        <button data-toggle="setTrackSolo" data-track="1">Solo</button>
+        <button class="arm" data-track="1">Arm</button>
+      </div>
+    </div>
+    <div class="strip">
+      <h3>Alto <span class="voices" id="voices-2">0</span></h3>
+      <label class="row"><span>Gain</span><b id="gain-2-value">0.8</b></label>
+      <input id="gain-2" data-param="setTrackGain" data-track="2" type="range" min="0" max="1.5" value="0.8" step="0.01" />
+      <label class="row"><span>Pan</span><b id="pan-2-value">0.2</b></label>
+      <input id="pan-2" data-param="setTrackPan" data-track="2" type="range" min="-1" max="1" value="0.2" step="0.01" />
+      <div class="buttons">
+        <button data-toggle="setTrackMute" data-track="2">Mute</button>
+        <button data-toggle="setTrackSolo" data-track="2">Solo</button>
+        <button class="arm" data-track="2">Arm</button>
+      </div>
+    </div>
+    <div class="strip">
+      <h3>Lead <span class="voices" id="voices-3">0</span></h3>
+      <label class="row"><span>Gain</span><b id="gain-3-value">0.8</b></label>
+      <input id="gain-3" data-param="setTrackGain" data-track="3" type="range" min="0" max="1.5" value="0.8" step="0.01" />
+      <label class="row"><span>Pan</span><b id="pan-3-value">0.6</b></label>
+      <input id="pan-3" data-param="setTrackPan" data-track="3" type="range" min="-1" max="1" value="0.6" step="0.01" />
+      <div class="buttons">
+        <button data-toggle="setTrackMute" data-track="3">Mute</button>
+        <button data-toggle="setTrackSolo" data-track="3">Solo</button>
+        <button class="arm" data-track="3">Arm</button>
+      </div>
     </div>
   </div>
 
@@ -92,53 +168,57 @@
 
   <div class="panels">
     <fieldset>
-      <legend>Envelope</legend>
+      <legend>Envelope &mdash; <span id="armed-name">Bass</span></legend>
       <label class="row"><span>Attack</span><b id="attack-value">5</b></label>
       <input id="attack" data-param="setAttack" type="range" min="0" max="2000" value="5" step="1" />
-
       <label class="row"><span>Decay</span><b id="decay-value">120</b></label>
       <input id="decay" data-param="setDecay" type="range" min="1" max="3000" value="120" step="1" />
-
       <label class="row"><span>Sustain</span><b id="sustain-value">0.7</b></label>
       <input id="sustain" data-param="setSustain" type="range" min="0" max="1" value="0.7" step="0.01" />
-
       <label class="row"><span>Release</span><b id="release-value">250</b></label>
       <input id="release" data-param="setRelease" type="range" min="1" max="4000" value="250" step="1" />
     </fieldset>
 
     <fieldset>
-      <legend>Filter</legend>
+      <legend>Filter &mdash; armed track</legend>
       <label>Type</label>
       <select id="filter-type" data-param="setFilterType">
         <option value="0">Low pass</option>
         <option value="1">High pass</option>
         <option value="2">Band pass</option>
       </select>
-
       <label class="row"><span>Cutoff (Hz)</span><b id="cutoff-value">4000</b></label>
       <input id="cutoff" data-param="setFilterCutoff" type="range" min="40" max="18000" value="4000" step="10" />
-
       <label class="row"><span>Resonance</span><b id="resonance-value">0.9</b></label>
       <input id="resonance" data-param="setFilterResonance" type="range" min="0.1" max="12" value="0.9" step="0.1" />
-    </fieldset>
-
-    <fieldset>
-      <legend>Tone</legend>
       <label>Waveform</label>
       <select id="waveform" data-param="setWaveform">
         <option value="1">Saw</option>
         <option value="0">Sine</option>
         <option value="2">Square</option>
       </select>
+    </fieldset>
 
-      <label class="row"><span>Master gain</span><b id="gain-value">0.25</b></label>
-      <input id="gain" data-param="setMasterGain" type="range" min="0" max="1" value="0.25" step="0.01" />
+    <fieldset>
+      <legend>Master bus</legend>
+      <label class="row"><span>Gain</span><b id="master-value">0.9</b></label>
+      <input id="master" data-param="setMasterGain" type="range" min="0" max="1.5" value="0.9" step="0.01" />
+      <label>Saturation</label>
+      <select id="saturation" data-param="setMasterSaturation">
+        <option value="1">On (soft knee)</option>
+        <option value="0">Off (hard clamp)</option>
+      </select>
+      <p class="hint" style="margin-top:12px">
+        Turn saturation off and drive the mix hard to hear the difference the
+        soft knee makes against a hard clamp.
+      </p>
     </fieldset>
   </div>
 
   <p class="hint">
-    Computer keyboard: <code>A</code>–<code>;</code> for white keys, <code>W E T Y U O P</code> for black.
-    MIDI input: <b id="midi-status">checking…</b>
+    Click steps to build a pattern, then <b>Play loop</b>. The armed track receives
+    keyboard input: <code>A</code>&ndash;<code>;</code> white keys, <code>W E T Y U O P</code> black.
+    MIDI input: <b id="midi-status">checking&hellip;</b>
   </p>
 </main>
 

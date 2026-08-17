@@ -1198,6 +1198,25 @@ void testScheduledEventsAreIgnoredWhileStopped() {
     check(peakBetween(rendered, 0, 1024) == 0.0f,
           "a scheduled event should not fire while the transport is stopped");
     check(engine.transport().position() == 0, "a stopped transport should not advance");
+
+    // The case that actually bites: an event sitting exactly on the stopped
+    // playhead. It must wait rather than fire into silence and be spent by
+    // the time the user presses play.
+    daw::Engine atZero;
+    atZero.prepare(48000.0, 128);
+    (void)atZero.addTrack();
+    atZero.track(0).synth().setWaveform(daw::Waveform::Square);
+    atZero.track(0).synth().setEnvelopeParameters({0.0f, 1000.0f, 1.0f, 5.0f});
+
+    check(atZero.pushCommand({daw::CommandType::NoteOn, 1.0f, 69, 0, true, 0}), "queue note at sample zero");
+    const std::vector<float> whileStopped = renderEngine(atZero, 1024, 128);
+    check(peakBetween(whileStopped, 0, 1024) == 0.0f,
+          "an event on sample zero should stay pending while stopped, not fire under a parked playhead");
+
+    check(atZero.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0, false, 0}), "queue play");
+    const std::vector<float> afterPlay = renderEngine(atZero, 1024, 128);
+    check(peakBetween(afterPlay, 0, 1024) > 0.01f,
+          "the same event should fire as soon as the transport starts moving");
 }
 
 void testTransportLoopWrapsAndRearmsEvents() {

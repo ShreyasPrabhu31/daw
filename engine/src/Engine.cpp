@@ -233,7 +233,12 @@ void Engine::render(AudioBuffer& output) noexcept {
     // nothing is pending this is a single pass and costs one extra compare.
     while (offset < frames) {
         const std::uint64_t now = transport_.position();
-        fireDueEvents(now);
+
+        // Only a moving playhead fires timeline events. Without this gate an
+        // event sitting exactly on the current position counts as due while
+        // stopped, fires into silence, and is then already spent when the
+        // user actually presses play.
+        if (transport_.isPlaying()) fireDueEvents(now);
 
         std::size_t chunk = frames - offset;
 

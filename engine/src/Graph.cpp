@@ -1,7 +1,13 @@
 #include "daw/Graph.hpp"
 
+// Sleeping is only ever done by the message thread of a native host. Pulling
+// <thread> into the WASM build would add wasi_snapshot_preview1 imports that a
+// standalone module has no host to satisfy, and the browser never takes this
+// path anyway.
+#if !defined(__EMSCRIPTEN__)
 #include <chrono>
 #include <thread>
+#endif
 
 namespace daw {
 
@@ -61,6 +67,13 @@ bool Graph::retireSlot(int slot) {
     if (slot < 0) return true;
     if (consumedPlan_.load(std::memory_order_acquire) != slot) return true;
 
+#if defined(__EMSCRIPTEN__)
+    // In an AudioWorklet, rebuild() would be called from the port's message
+    // handler, which shares the audio thread with process(). Blocking there
+    // is exactly the dropout this whole design exists to avoid, so refuse the
+    // edit and let the caller retry on a later message instead.
+    return false;
+#else
     // A running stream at 48 kHz with 128-frame blocks produces a block every
     // 2.67 ms, so a 5 ms window with no progress means rendering is stopped
     // and nobody can be inside process().
@@ -75,6 +88,7 @@ bool Graph::retireSlot(int slot) {
         if (renderCount_.load(std::memory_order_acquire) == before) return true;
     }
     return false;
+#endif
 }
 
 bool Graph::rebuild() {

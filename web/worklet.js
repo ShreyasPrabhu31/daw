@@ -1,5 +1,12 @@
 // Runs on the audio thread. Has no fetch and no DOM, so the wasm bytes
 // arrive via postMessage from the main thread instead of being fetched here.
+//
+// This handler and process() are interleaved on the same thread rather than
+// concurrent, so calling into the engine from here is safe. It is still the
+// audio thread though: nothing in here may block, and graph topology is fixed
+// at init for exactly that reason.
+const NUM_TRACKS = 4;
+
 class DawProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -10,11 +17,9 @@ class DawProcessor extends AudioWorkletProcessor {
     this.maxBlockFrames = 1024;
     this.blocksSinceReport = 0;
 
-    // Message name to wasm export. Everything here ends up on the engine's
-    // command queue, so none of it touches the synth mid-block.
-    this.setters = {
+    // Message name to wasm export, for the calls that take (track, value).
+    this.trackSetters = {
       setWaveform: 'daw_set_waveform',
-      setMasterGain: 'daw_set_master_gain',
       setAttack: 'daw_set_attack',
       setDecay: 'daw_set_decay',
       setSustain: 'daw_set_sustain',
@@ -22,27 +27,69 @@ class DawProcessor extends AudioWorkletProcessor {
       setFilterType: 'daw_set_filter_type',
       setFilterCutoff: 'daw_set_filter_cutoff',
       setFilterResonance: 'daw_set_filter_resonance',
+      setTrackGain: 'daw_set_track_gain',
+      setTrackPan: 'daw_set_track_pan',
+      setTrackMute: 'daw_set_track_mute',
+      setTrackSolo: 'daw_set_track_solo',
     };
 
-    this.port.onmessage = (event) => {
-      const { type } = event.data;
+    // Calls that take a single value and ignore the track.
+    this.globalSetters = {
+      setMasterGain: 'daw_set_master_gain',
+      setMasterSaturation: 'daw_set_master_saturation',
+      transportSetLoop: 'daw_transport_set_loop',
+      transportSetPosition: 'daw_transport_set_position',
+    };
 
-      if (type === 'init') {
-        this._init(event.data.wasmBytes);
+    this.port.onmessage = (event) => this._handle(event.data);
+  }
+
+  _handle(data) {
+    const { type } = data;
+
+    if (type === 'init') {
+      this._init(data.wasmBytes);
+      return;
+    }
+    if (!this.exports) return;
+
+    switch (type) {
+      case 'noteOn':
+        this.exports.daw_note_on(data.track, data.note, data.velocity);
         return;
-      }
-      if (!this.exports) return;
-
-      if (type === 'noteOn') {
-        this.exports.daw_note_on(event.data.note, event.data.velocity);
-      } else if (type === 'noteOff') {
-        this.exports.daw_note_off(event.data.note);
-      } else if (type === 'allNotesOff') {
+      case 'noteOff':
+        this.exports.daw_note_off(data.track, data.note);
+        return;
+      case 'allNotesOff':
         this.exports.daw_all_notes_off();
-      } else if (this.setters[type]) {
-        this.exports[this.setters[type]](event.data.value);
-      }
-    };
+        return;
+      case 'scheduleNoteOn':
+        this.exports.daw_schedule_note_on(data.track, data.note, data.velocity, data.time);
+        return;
+      case 'scheduleNoteOff':
+        this.exports.daw_schedule_note_off(data.track, data.note, data.time);
+        return;
+      case 'clearScheduled':
+        this.exports.daw_clear_scheduled_events();
+        return;
+      case 'setLoopRange':
+        this.exports.daw_set_loop_range(data.start, data.end);
+        return;
+      case 'transportPlay':
+        this.exports.daw_transport_play();
+        return;
+      case 'transportStop':
+        this.exports.daw_transport_stop();
+        return;
+      default:
+        break;
+    }
+
+    if (this.trackSetters[type]) {
+      this.exports[this.trackSetters[type]](data.track, data.value);
+    } else if (this.globalSetters[type]) {
+      this.exports[this.globalSetters[type]](data.value);
+    }
   }
 
   async _init(wasmBytes) {
@@ -55,7 +102,7 @@ class DawProcessor extends AudioWorkletProcessor {
       this.exports._initialize();
     }
 
-    this.exports.daw_init(sampleRate);
+    const tracks = this.exports.daw_init(sampleRate, NUM_TRACKS);
 
     // ALLOW_MEMORY_GROWTH=0 means this buffer never detaches, so these views
     // are built once here and reused for the processor's lifetime.
@@ -66,7 +113,7 @@ class DawProcessor extends AudioWorkletProcessor {
     this.rightView = new Float32Array(memory, rightPtr, this.maxBlockFrames);
 
     this.ready = true;
-    this.port.postMessage({ type: 'ready' });
+    this.port.postMessage({ type: 'ready', tracks });
   }
 
   process(_inputs, outputs) {
@@ -91,10 +138,16 @@ class DawProcessor extends AudioWorkletProcessor {
     // main thread with messages it cannot paint anywhere near that fast.
     if (++this.blocksSinceReport >= 16) {
       this.blocksSinceReport = 0;
+
+      const voices = [];
+      for (let i = 0; i < NUM_TRACKS; ++i) voices.push(this.exports.daw_active_voice_count(i));
+
       this.port.postMessage({
         type: 'meter',
-        voices: this.exports.daw_active_voice_count(),
+        voices,
         peak: this.exports.daw_peak_level(),
+        position: this.exports.daw_transport_position(),
+        playing: this.exports.daw_transport_is_playing() === 1,
       });
     }
 
