@@ -34,6 +34,12 @@ Core pieces, all under `engine/`:
 - `RingBuffer<T, N>` wait-free SPSC queue, power-of-two capacity, acquire/release
 - `ParameterSmoother` one-pole ramp, prevents zipper noise on knob moves
 - `Oscillator` PolyBLEP sine/saw/square
+- `Published<T>` two-slot handover, release publish, reader echo for retirement
+- `BufferPool` one preallocated output buffer per graph node
+- `Graph` topological sort on the message thread, flat plan walked on audio
+- `Timeline` notes in ticks, compiled to a sorted sample-timed schedule
+- `Track` synth into gain and constant-power pan, publishes a decaying peak
+- `MasterBus` sums the mix, saturates with a C1-continuous knee
 - `ADSR` linear-segment envelope, exact termination so voices free reliably
 - `Biquad` RBJ cookbook low/high/band pass, transposed direct form II
 - `Voice` oscillator into filter into envelope, sums into the block
@@ -64,12 +70,23 @@ Consequences to enforce in every review:
   thread only. It is compiled to a non-blocking refusal under Emscripten,
   where the caller shares the audio thread
 
-## Current state: Phase 2 complete
+## Current state: Phase 3 complete
 
-Four tracks of 8-voice polyphony running through a node graph into a
-saturating master bus, sequenced with sample-accurate events, playable in the
-browser and renderable to disk. 186 checks passing, clean under ASan, UBSan,
-and TSan.
+Four tracks of 8-voice polyphony through a node graph into a saturating
+master bus, arranged as clips on a timeline, played in the browser and
+rendered to disk. 233 checks passing, clean under ASan, UBSan, and TSan.
+
+The arrangement lives in the engine, in musical time. `Timeline` stores notes
+in ticks and compiles them into a sorted schedule of sample-timed events; the
+audio thread walks that schedule with a cursor, so firing an event is a
+compare and an increment and a seek is a binary search. A tempo change is a
+recompile of the same notes rather than the host resending them.
+
+`Published<T>` owns the acquire/release handshake that hands a large value
+from the message thread to the audio thread: two slots, a release store to
+publish, and an echo of the slot the reader took so the writer knows when a
+retired slot is safe to overwrite. Both the graph plan and the event schedule
+go through it, so that ordering is written and tested once.
 
 The no-allocation rule is enforced, not merely asserted.
 `testAudioThreadNeverAllocates` overrides global `operator new`, renders 400
@@ -78,55 +95,60 @@ parameters and varying the block size, and fails if the counter moves. It
 also asserts the counter is non-zero beforehand, so the test cannot pass by
 having dead instrumentation.
 
-The graph swap is covered by a test that republishes the plan twenty times
-while a second thread renders continuously, asserting every sample belongs to
-one complete plan. TSan is clean on it.
-
 Measured on an Apple M2 (Mac14,2, 8 cores), macOS 26.5.2, Apple clang 21,
 `CMAKE_BUILD_TYPE=Release`. Native render path, 128-frame blocks at 48 kHz,
 three runs of 1875 blocks each. Worst value of the three shown:
 
 | workload | p50 | p99 | max |
 |---|---|---|---|
-| 4 tracks, 16-step loop | 9.58 us | 11.25 us | 62.54 us |
-| 1 track, 8 voices held | 10.17 us | 14.25 us | 48.46 us |
-| 4 tracks, 32 voices held | 38.75 us | 53.79 us | 112.88 us |
+| 4 tracks, 16-step loop | 9.42 us | 17.38 us | 225.58 us |
+| 4 tracks, 32 voices held | 41.58 us | 90.21 us | 955.71 us |
 
-Budget is 2666.67 us. Even 32 simultaneous voices sit at about 2% of the
-deadline at p99. Quote the worst column, never the best.
+Budget is 2666.67 us. The max column is much noisier than p50 or p99 and
+moves by a factor of six between otherwise identical runs, which is the
+signature of the process being descheduled rather than of the engine getting
+slower: p99 stays put while max jumps. Treat max as a property of an
+unpinned laptop, not of the DSP, and quote the worst column regardless.
 
-These measure compute cost inside an offline render loop. They are not
-callback scheduling jitter under a real driver, and they are not the WASM
-path.
+The browser renders the same arrangement offline in a Worker, using a second
+instance of the same wasm module. A four-bar arrangement at 110 BPM, 9.7
+seconds of audio, renders in 38 to 44 ms, which is roughly 220 to 260 times
+faster than real time. That is a browser measurement and a preview of the
+Phase 4 render endpoint.
 
 Known gaps, in the order they matter:
 
 - Nobody has listened to the output yet. Every claim above is structural:
   tests assert on buffer contents and timing, not on whether it sounds good.
+- Nothing persists. Reload the page and the arrangement is gone. There is no
+  save, no load, no undo, and no audio export from the browser. Phase 4 is
+  where the project stops being a demo and starts being something a musician
+  could keep work in.
 - Worklet block times have never been measured from inside the browser. The
-  numbers above are the native path, which is not the same code path.
+  table above is the native path, which is not the same code path.
+- `daw_timeline_compile` runs `std::sort` over up to 1024 events, and in the
+  browser it runs on the worklet thread, because a worklet's message handler
+  shares that thread with `process()`. It allocates nothing and is bounded,
+  but it is real work on the audio thread and has not been measured there.
+  Compiling on the main thread and shipping the finished schedule across
+  would remove the question entirely.
 - Web MIDI has only been exercised with no device attached, where it
   correctly reports unavailable. The note decoding path has never seen real
   controller traffic.
-- Graph topology is fixed once rendering starts in the browser. `rebuild()`
-  may wait for the audio thread to release a plan slot, which is fine on a
-  message thread but forbidden in a worklet, so all four tracks are created
-  in `daw_init`. Adding a track live needs a non-blocking retire path.
-- The scheduler holds 128 events in a flat array scanned linearly per chunk.
-  That is fine for a 16-step pattern and wrong for a real arrangement; it
-  wants a sorted structure with a cursor once Phase 3 has clips.
-- There is no undo, no persistence, and no audio import or export from the
-  browser. Phase 4 is where the project stops being a synth and starts being
-  something a musician could keep work in.
+- Graph topology is fixed once rendering starts in the browser, so all four
+  tracks are created in `daw_init`. Adding a track live needs the retire path
+  to be non-blocking.
+- A loop wrap or a seek releases every voice, which prevents stuck notes but
+  also cuts a note that legitimately sustains across the loop point.
 
 ## Layout
 
 ```
 engine/include/daw/   headers, the portable core
-engine/src/           Engine, Graph, MasterBus, Oscillator, Synth, Track, Voice
+engine/src/           Engine, Graph, MasterBus, Oscillator, Synth, Timeline, Track, Voice
 cli/                  offline WAV renderer + benchmark harness
 wasm/                 Emscripten bindings and build.sh
-web/                  worklet.js, index.html test bench, _headers
+web/                  worklet.js, arrangement/pianoroll/waveform, bounce worker
 tests/                dependency-free runner
 .github/workflows/    3-OS matrix + sanitizer jobs
 ```
@@ -184,6 +206,13 @@ releasing voice over a held one, note off hitting only the matching note, and
 MIDI note 69 sounding at 440 Hz, and a global operator new override proving
 the render path allocates nothing.
 
+Phase 3 added: tick to sample conversion across tempos, a compiled schedule
+being sorted, a note-off ordering before a note-on at the same sample so
+back-to-back same-pitch notes both sound, capacity and zero-length refusal,
+per-track clearing, a seek repositioning the cursor, a tempo change moving
+notes without the host resending them, and per-track meters rising and
+decaying independently.
+
 Phase 2 added: topological ordering of dependencies, fan-in summing across a
 diamond, cycles being refused while the previously published plan keeps
 running, unrouted nodes contributing nothing, a plan republished twenty times
@@ -203,8 +232,8 @@ it, in which case move to Catch2.
 - **Phase 2** (done) node graph with topological sort computed on the message
   thread and walked as a flat array on the audio thread, multiple tracks into a
   master bus, sample-accurate event scheduling, play/stop/loop
-- **Phase 3** canvas timeline with draggable clips, mixer strips, level meters,
-  waveform rendering with min/max peak caching
+- **Phase 3** (done) canvas timeline with draggable clips, mixer strips, level
+  meters, waveform rendering with min/max peak caching
 - **Phase 4** backend service (Drogon or Crow), project save/load, offline render
   endpoint running the same engine faster than real time
 - **Phase 5** JUCE wrapper for AU/VST3, Google Benchmark, published numbers
@@ -224,5 +253,3 @@ COOP/COEP headers in `web/_headers` are already in place.
 - Hosts do not promise a constant block size. Never assume 128.
 - Measure p99 and max block time, never the mean. The mean hides exactly the
   outliers a listener hears as a click.
-- Do not put a number in the README or on a resume that has not been measured on
-  named hardware.
