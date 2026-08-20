@@ -1,13 +1,13 @@
 #pragma once
 
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
 #include "daw/AudioBuffer.hpp"
 #include "daw/BufferPool.hpp"
 #include "daw/Node.hpp"
+#include "daw/Published.hpp"
 
 namespace daw {
 
@@ -19,10 +19,9 @@ namespace daw {
 // run this node". Executing the graph is then a loop over contiguous memory
 // with no graph traversal, no recursion, and no branching on topology.
 //
-// Plans live in two preallocated slots. rebuild() writes the idle slot and
-// publishes it with a release store; the audio thread picks it up with an
-// acquire load once per block and reports back which slot it used, so the
-// message thread can tell when the retired slot is safe to overwrite.
+// The plan is handed over through Published<Plan>, which owns the acquire /
+// release handshake that keeps a plan from being rewritten while it is being
+// walked.
 class Graph {
 public:
     static constexpr std::size_t kMaxNodes = 64;
@@ -56,7 +55,7 @@ public:
     void process(AudioBuffer& output) noexcept;
 
     [[nodiscard]] std::size_t numNodes() const noexcept { return numNodes_; }
-    [[nodiscard]] bool hasLivePlan() const noexcept { return livePlan_.load(std::memory_order_acquire) >= 0; }
+    [[nodiscard]] bool hasLivePlan() const noexcept { return plans_.hasLive(); }
 
     // Execution order of the live plan, for tests and for showing the signal
     // flow in the UI later.
@@ -84,10 +83,6 @@ private:
         std::uint8_t destination;
     };
 
-    // Blocks until the audio thread has moved off `slot`, or concludes that
-    // no rendering is happening. Message thread only.
-    bool retireSlot(int slot);
-
     std::array<Node*, kMaxNodes> nodes_{};
     std::size_t numNodes_ = 0;
 
@@ -101,12 +96,7 @@ private:
     std::size_t maxBlockSize_ = 0;
     bool prepared_ = false;
 
-    Plan plans_[2];
-    int writeSlot_ = 0;
-
-    std::atomic<int> livePlan_{-1};    // published by the message thread
-    std::atomic<int> consumedPlan_{-1}; // echoed back by the audio thread
-    std::atomic<std::uint64_t> renderCount_{0};
+    Published<Plan> plans_;
 };
 
 } // namespace daw

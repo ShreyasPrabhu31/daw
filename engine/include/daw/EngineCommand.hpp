@@ -34,24 +34,18 @@ enum class CommandType : std::uint8_t {
     TransportStop,
     TransportSetPosition, // intValue = sample position
     TransportSetLoop,     // intValue nonzero to enable looping
-    ClearScheduledEvents,
 };
 
-// `scheduled` is a separate flag rather than a sentinel value of `time`.
-// Overloading "time == 0" to mean immediate looks tidy until you try to place
-// an event on the very first sample of a loop: it silently becomes a live
-// gesture, fires once, and never repeats. Sample zero is a perfectly ordinary
-// position on the timeline and has to stay addressable.
-//
-// When `scheduled` is set, `time` is an absolute transport position in
-// samples, honoured exactly by splitting the render block at that boundary.
+// Every command here is applied as soon as the audio thread drains it. Timed
+// musical events are not commands: they live in the Timeline, which compiles
+// them into a sorted schedule the renderer walks with a cursor. Keeping the
+// two apart is what stopped a note's position from being a property of the
+// message that happened to carry it.
 struct EngineCommand {
     CommandType type;
     float floatValue = 0.0f;
     std::int32_t intValue = 0;
     std::uint8_t track = 0;
-    bool scheduled = false;
-    std::uint64_t time = 0;
 };
 
 } // namespace daw

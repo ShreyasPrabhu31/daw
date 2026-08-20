@@ -8,6 +8,7 @@ namespace daw {
 void Engine::prepare(double sampleRate, std::size_t maxBlockSize, std::size_t numChannels) {
     graph_.prepare(sampleRate, maxBlockSize, numChannels);
     transport_.prepare(sampleRate);
+    timeline_.prepare();
 
     const Graph::NodeId masterId = graph_.addNode(&master_);
     graph_.setOutputNode(masterId);
@@ -62,26 +63,10 @@ void Engine::resolveTrackActivity() noexcept {
     }
 }
 
-void Engine::schedule(const EngineCommand& command) noexcept {
-    for (ScheduledEvent& event : scheduled_) {
-        if (event.occupied) continue;
-        event.command = command;
-        event.occupied = true;
-        event.fired = false;
-        return;
-    }
-    // Table full. Dropping the newest event is the honest failure: silently
-    // evicting an older one would make the timeline change under the user.
-}
-
 void Engine::drainCommands() noexcept {
     EngineCommand command{};
     while (commandQueue_.pop(command)) {
-        if (command.scheduled) {
-            schedule(command);
-        } else {
-            applyCommand(command);
-        }
+        applyCommand(command);
     }
 }
 
@@ -158,63 +143,76 @@ void Engine::applyCommand(const EngineCommand& command) noexcept {
             break;
 
         case CommandType::TransportPlay:
+            // The playhead may have been moved while stopped, so the cursor
+            // cannot be trusted to still point at the right event.
+            cursorValid_ = false;
             transport_.play();
             break;
         case CommandType::TransportStop:
             transport_.stop();
-            for (std::size_t i = 0; i < numTracks_; ++i) tracks_[i].synth().allNotesOff();
+            releaseAllVoices();
             break;
         case CommandType::TransportSetPosition:
             transport_.setPosition(static_cast<std::uint64_t>(std::max(command.intValue, 0)));
+            cursorValid_ = false;
+            releaseAllVoices();
             break;
         case CommandType::TransportSetLoop:
             transport_.setLoopEnabled(command.intValue != 0);
             break;
-        case CommandType::ClearScheduledEvents:
-            for (ScheduledEvent& event : scheduled_) {
-                event.occupied = false;
-                event.fired = false;
-            }
-            break;
     }
 }
 
+void Engine::releaseAllVoices() noexcept {
+    for (std::size_t i = 0; i < numTracks_; ++i) tracks_[i].synth().allNotesOff();
+}
+
+// Binary search rather than a scan: this runs on the audio thread every time
+// the playhead jumps, and a song's event list is not small.
+void Engine::seekCursor(std::uint64_t position) noexcept {
+    if (activeSchedule_ == nullptr) {
+        cursor_ = 0;
+        return;
+    }
+
+    std::size_t low = 0;
+    std::size_t high = activeSchedule_->count;
+    while (low < high) {
+        const std::size_t mid = low + (high - low) / 2;
+        if (activeSchedule_->events[mid].time < position) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    cursor_ = low;
+}
+
+// The events are sorted, so everything due is a contiguous run starting at the
+// cursor. Firing is a compare and an increment, not a scan of the whole song.
 void Engine::fireDueEvents(std::uint64_t now) noexcept {
-    for (ScheduledEvent& event : scheduled_) {
-        if (!event.occupied || event.fired) continue;
-        if (event.command.time > now) continue;
-        event.fired = true;
-        applyCommand(event.command);
+    if (activeSchedule_ == nullptr) return;
+
+    while (cursor_ < activeSchedule_->count && activeSchedule_->events[cursor_].time <= now) {
+        applyCommand(activeSchedule_->events[cursor_].command);
+        ++cursor_;
     }
 }
 
-std::uint64_t Engine::nextEventTime(std::uint64_t after) const noexcept {
-    std::uint64_t soonest = kNever;
-    for (const ScheduledEvent& event : scheduled_) {
-        if (!event.occupied || event.fired) continue;
-        if (event.command.time <= after) continue;
-        soonest = std::min(soonest, event.command.time);
-    }
-    return soonest;
+std::uint64_t Engine::nextEventTime() const noexcept {
+    if (activeSchedule_ == nullptr || cursor_ >= activeSchedule_->count) return kNever;
+    return activeSchedule_->events[cursor_].time;
 }
 
-void Engine::rearmLoopedEvents() noexcept {
-    const std::uint64_t start = transport_.loopStart();
-    const std::uint64_t end = transport_.loopEnd();
-
-    for (ScheduledEvent& event : scheduled_) {
-        if (!event.occupied) continue;
-        const std::uint64_t time = event.command.time;
-        if (time >= start && time < end) event.fired = false;
-    }
+bool Engine::compileTimeline() {
+    return timeline_.compile(transport_.sampleRate(), transport_.tempo());
 }
 
-std::size_t Engine::scheduledEventCount() const noexcept {
-    std::size_t count = 0;
-    for (const ScheduledEvent& event : scheduled_) {
-        if (event.occupied) ++count;
-    }
-    return count;
+void Engine::setLoopTicks(std::uint32_t startTick, std::uint32_t endTick) noexcept {
+    const double sampleRate = transport_.sampleRate();
+    const double bpm = transport_.tempo();
+    transport_.setLoop(Timeline::ticksToSamples(startTick, sampleRate, bpm),
+                       Timeline::ticksToSamples(endTick, sampleRate, bpm));
 }
 
 void Engine::render(AudioBuffer& output) noexcept {
@@ -225,6 +223,14 @@ void Engine::render(AudioBuffer& output) noexcept {
 
     drainCommands();
 
+    // One acquire per block. A schedule that just changed underneath us
+    // invalidates the cursor, since it indexes into the old array.
+    const Timeline::Schedule* schedule = timeline_.acquire();
+    if (schedule != activeSchedule_) {
+        activeSchedule_ = schedule;
+        cursorValid_ = false;
+    }
+
     const std::size_t frames = output.numFrames();
     std::size_t offset = 0;
 
@@ -233,6 +239,11 @@ void Engine::render(AudioBuffer& output) noexcept {
     // nothing is pending this is a single pass and costs one extra compare.
     while (offset < frames) {
         const std::uint64_t now = transport_.position();
+
+        if (!cursorValid_) {
+            seekCursor(now);
+            cursorValid_ = true;
+        }
 
         // Only a moving playhead fires timeline events. Without this gate an
         // event sitting exactly on the current position counts as due while
@@ -243,7 +254,7 @@ void Engine::render(AudioBuffer& output) noexcept {
         std::size_t chunk = frames - offset;
 
         if (transport_.isPlaying()) {
-            const std::uint64_t next = nextEventTime(now);
+            const std::uint64_t next = nextEventTime();
             if (next != kNever) {
                 const std::uint64_t untilEvent = next - now;
                 if (untilEvent < chunk) chunk = static_cast<std::size_t>(untilEvent);
@@ -260,7 +271,13 @@ void Engine::render(AudioBuffer& output) noexcept {
 
         const std::uint64_t before = transport_.position();
         transport_.advance(chunk);
-        if (transport_.position() < before) rearmLoopedEvents();
+
+        if (transport_.position() < before) {
+            // Wrapping leaves the cursor past the end of the song and can
+            // strand a note whose note-off sits behind it, so both are reset.
+            cursorValid_ = false;
+            releaseAllVoices();
+        }
 
         offset += chunk;
     }

@@ -57,13 +57,20 @@ void Track::process(AudioBuffer& buffer) noexcept {
     const std::size_t channels = buffer.numChannels();
     if (channels == 0) return;
 
+    // Decay the previous reading rather than starting from zero, so a peak
+    // that happened between two UI paints still shows up as a falling meter
+    // instead of vanishing.
+    float peak = peak_.load(std::memory_order_relaxed) * decayPerBlock_;
+
     if (channels == 1) {
         float* mono = buffer.channel(0);
         for (std::size_t i = 0; i < frames; ++i) {
             // Mono output collapses the pair, otherwise a hard pan would
             // silence a mono render entirely.
             mono[i] *= leftSmoother_.next() + rightSmoother_.next();
+            peak = std::max(peak, std::fabs(mono[i]));
         }
+        peak_.store(peak, std::memory_order_relaxed);
         return;
     }
 
@@ -72,7 +79,10 @@ void Track::process(AudioBuffer& buffer) noexcept {
     for (std::size_t i = 0; i < frames; ++i) {
         left[i] *= leftSmoother_.next();
         right[i] *= rightSmoother_.next();
+        peak = std::max(peak, std::max(std::fabs(left[i]), std::fabs(right[i])));
     }
+
+    peak_.store(peak, std::memory_order_relaxed);
 }
 
 } // namespace daw

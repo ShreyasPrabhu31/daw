@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "daw/AudioBuffer.hpp"
 #include "daw/Node.hpp"
 #include "daw/ParameterSmoother.hpp"
@@ -27,6 +29,11 @@ public:
     // through the same smoother as gain so muting never clicks.
     void setActive(bool active) noexcept;
 
+    // Post-fader peak, published for the mixer strip. Decays rather than
+    // resetting each block, so a meter painted at screen rate still catches
+    // a transient that happened between paints.
+    [[nodiscard]] float peakLevel() const noexcept { return peak_.load(std::memory_order_relaxed); }
+
     [[nodiscard]] float gain() const noexcept { return gain_; }
     [[nodiscard]] float pan() const noexcept { return pan_; }
     [[nodiscard]] bool isActive() const noexcept { return active_; }
@@ -38,6 +45,8 @@ private:
     ParameterSmoother leftSmoother_;
     ParameterSmoother rightSmoother_;
 
+    std::atomic<float> peak_{0.0f};
+    float decayPerBlock_ = 0.85f;
     float gain_ = 0.8f;
     float pan_ = 0.0f;
     float panLeft_ = 0.70710678f; // cos(pi/4), centre

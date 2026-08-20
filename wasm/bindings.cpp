@@ -1,4 +1,5 @@
 #include "daw/Engine.hpp"
+#include "daw/Timeline.hpp"
 
 // Standalone WASM export surface. No JS glue: the worklet calls these by
 // name after running the module's own static constructors via _initialize.
@@ -13,7 +14,12 @@
 // created inside daw_init, before any rendering starts, and the topology is
 // never touched again from the browser.
 //
-// Timestamps cross the boundary as double rather than i64 deliberately: a
+// The arrangement is edited directly rather than through the command queue.
+// Editing is message-thread work, and in a worklet the message handler and
+// process() are interleaved on one thread rather than concurrent, so a direct
+// call is safe here and avoids pushing a whole song through a 256-slot queue.
+//
+// Sample counts cross the boundary as double rather than i64 deliberately: a
 // standalone module with no glue would otherwise force BigInt on every call,
 // and a double holds an exact integer sample count for about 5700 years at
 // 48 kHz.
@@ -35,17 +41,6 @@ static void push(daw::CommandType type, float floatValue, std::int32_t intValue,
     command.track = static_cast<std::uint8_t>(track < 0 ? 0 : track);
     // A dropped command means the queue is full, which at UI rates means
     // something upstream is spamming; losing one update beats blocking.
-    (void)gEngine.pushCommand(command);
-}
-
-static void pushAt(daw::CommandType type, float floatValue, std::int32_t intValue, int track, double time) {
-    daw::EngineCommand command{};
-    command.type = type;
-    command.floatValue = floatValue;
-    command.intValue = intValue;
-    command.track = static_cast<std::uint8_t>(track < 0 ? 0 : track);
-    command.scheduled = true;
-    command.time = time < 0.0 ? 0 : static_cast<std::uint64_t>(time);
     (void)gEngine.pushCommand(command);
 }
 
@@ -83,19 +78,54 @@ void daw_all_notes_off() {
     push(daw::CommandType::AllNotesOff, 0.0f, 0, 0);
 }
 
-__attribute__((export_name("daw_schedule_note_on")))
-void daw_schedule_note_on(int track, int midiNote, float velocity, double timeSamples) {
-    pushAt(daw::CommandType::NoteOn, velocity, midiNote, track, timeSamples);
+// --- arrangement ---
+
+__attribute__((export_name("daw_timeline_clear")))
+void daw_timeline_clear() {
+    gEngine.timeline().clear();
 }
 
-__attribute__((export_name("daw_schedule_note_off")))
-void daw_schedule_note_off(int track, int midiNote, double timeSamples) {
-    pushAt(daw::CommandType::NoteOff, 0.0f, midiNote, track, timeSamples);
+__attribute__((export_name("daw_timeline_clear_track")))
+void daw_timeline_clear_track(int track) {
+    gEngine.timeline().clearTrack(static_cast<std::uint8_t>(track < 0 ? 0 : track));
 }
 
-__attribute__((export_name("daw_clear_scheduled_events")))
-void daw_clear_scheduled_events() {
-    push(daw::CommandType::ClearScheduledEvents, 0.0f, 0, 0);
+__attribute__((export_name("daw_timeline_add_note")))
+int daw_timeline_add_note(int track, int pitch, double startTick, double lengthTicks, float velocity) {
+    daw::Note note{};
+    note.track = static_cast<std::uint8_t>(track < 0 ? 0 : track);
+    note.pitch = static_cast<std::uint8_t>(pitch < 0 ? 0 : (pitch > 127 ? 127 : pitch));
+    note.startTick = static_cast<std::uint32_t>(startTick < 0.0 ? 0.0 : startTick);
+    note.lengthTicks = static_cast<std::uint32_t>(lengthTicks < 1.0 ? 1.0 : lengthTicks);
+    note.velocity = velocity;
+    return gEngine.timeline().addNote(note) ? 1 : 0;
+}
+
+// Returns 0 when the audio thread still holds the slot being rewritten. The
+// caller should retry; the running arrangement keeps playing meanwhile.
+__attribute__((export_name("daw_timeline_compile")))
+int daw_timeline_compile() {
+    return gEngine.compileTimeline() ? 1 : 0;
+}
+
+__attribute__((export_name("daw_timeline_note_count")))
+int daw_timeline_note_count() {
+    return static_cast<int>(gEngine.timeline().noteCount());
+}
+
+__attribute__((export_name("daw_timeline_event_count")))
+int daw_timeline_event_count() {
+    return static_cast<int>(gEngine.scheduledEventCount());
+}
+
+__attribute__((export_name("daw_set_tempo")))
+void daw_set_tempo(double bpm) {
+    gEngine.transport().setTempo(bpm);
+}
+
+__attribute__((export_name("daw_ticks_per_quarter")))
+int daw_ticks_per_quarter() {
+    return static_cast<int>(daw::Timeline::kTicksPerQuarter);
 }
 
 __attribute__((export_name("daw_set_waveform")))
@@ -188,13 +218,12 @@ void daw_transport_set_loop(int enabled) {
     push(daw::CommandType::TransportSetLoop, 0.0f, enabled, 0);
 }
 
-// Loop bounds go straight to the transport rather than through the queue:
-// they are only ever set from daw_init or a stopped transport, and they must
-// be in place before the enable command takes effect.
-__attribute__((export_name("daw_set_loop_range")))
-void daw_set_loop_range(double startSamples, double endSamples) {
-    gEngine.transport().setLoop(static_cast<std::uint64_t>(startSamples),
-                                static_cast<std::uint64_t>(endSamples));
+// Loop bounds are musical, so they survive a tempo change without the host
+// recomputing them. They go straight to the transport rather than through the
+// queue because they must be in place before the enable command takes effect.
+__attribute__((export_name("daw_set_loop_ticks")))
+void daw_set_loop_ticks(double startTick, double endTick) {
+    gEngine.setLoopTicks(static_cast<std::uint32_t>(startTick), static_cast<std::uint32_t>(endTick));
 }
 
 __attribute__((export_name("daw_transport_position")))
@@ -216,6 +245,12 @@ int daw_active_voice_count(int track) {
 __attribute__((export_name("daw_peak_level")))
 float daw_peak_level() {
     return gEngine.peakLevel();
+}
+
+__attribute__((export_name("daw_track_peak")))
+float daw_track_peak(int track) {
+    if (track < 0 || static_cast<std::size_t>(track) >= gEngine.numTracks()) return 0.0f;
+    return gEngine.track(static_cast<std::size_t>(track)).peakLevel();
 }
 
 __attribute__((export_name("daw_num_tracks")))

@@ -9,6 +9,7 @@
 #include "daw/Oscillator.hpp"
 #include "daw/RingBuffer.hpp"
 #include "daw/Synth.hpp"
+#include "daw/Timeline.hpp"
 #include "daw/Voice.hpp"
 
 #include <algorithm>
@@ -296,7 +297,7 @@ void testCommandQueueOverflowIsGraceful() {
 
     bool allSucceeded = true;
     for (int i = 0; i < static_cast<int>(daw::Engine::kCommandQueueCapacity) + 10; ++i) {
-        const bool pushed = engine.pushCommand({daw::CommandType::SetMasterGain, 0.5f, 0, 0, 0});
+        const bool pushed = engine.pushCommand({daw::CommandType::SetMasterGain, 0.5f, 0, 0});
         if (!pushed) allSucceeded = false;
     }
     check(!allSucceeded, "pushing more commands than queue capacity should eventually report failure, not overwrite or crash");
@@ -705,7 +706,7 @@ void testPolyphonicOutputStaysInRange() {
     (void)engine.addTrack();
 
     for (int note = 60; note < 68; ++note) {
-        check(engine.pushCommand({daw::CommandType::NoteOn, 1.0f, note, 0, 0}),
+        check(engine.pushCommand({daw::CommandType::NoteOn, 1.0f, note, 0}),
               "note on command should fit in the queue");
     }
 
@@ -732,18 +733,18 @@ void testNoteCommandsRoundTripThroughQueue() {
     float* channels[2] = {left.data(), right.data()};
     daw::AudioBuffer buffer(channels, 2, 128);
 
-    check(engine.pushCommand({daw::CommandType::NoteOn, 0.9f, 60, 0, 0}), "note on should queue");
+    check(engine.pushCommand({daw::CommandType::NoteOn, 0.9f, 60, 0}), "note on should queue");
     engine.render(buffer);
     check(engine.track(0).synth().activeVoiceCount() == 1, "queued note on should start exactly one voice");
 
-    check(engine.pushCommand({daw::CommandType::SetRelease, 5.0f, 0, 0, 0}), "release change should queue");
-    check(engine.pushCommand({daw::CommandType::NoteOff, 0.0f, 60, 0, 0}), "note off should queue");
+    check(engine.pushCommand({daw::CommandType::SetRelease, 5.0f, 0, 0}), "release change should queue");
+    check(engine.pushCommand({daw::CommandType::NoteOff, 0.0f, 60, 0}), "note off should queue");
     engine.render(buffer);
 
     for (int block = 0; block < 20; ++block) engine.render(buffer);
     check(engine.track(0).synth().activeVoiceCount() == 0, "queued note off should let the voice finish and free itself");
 
-    check(engine.pushCommand({daw::CommandType::AllNotesOff, 0.0f, 0, 0, 0}), "all notes off should queue");
+    check(engine.pushCommand({daw::CommandType::AllNotesOff, 0.0f, 0, 0}), "all notes off should queue");
     engine.render(buffer);
     check(true, "all notes off should drain without crashing");
 }
@@ -815,6 +816,29 @@ std::vector<float> renderEngine(daw::Engine& engine, std::size_t totalFrames, st
         done += frames;
     }
     return captured;
+}
+
+// At 48 kHz and 125 BPM a tick is exactly 24 samples, so tests can talk in
+// musical time and still assert on exact sample positions.
+constexpr double kTestBpm = 125.0;
+constexpr std::uint64_t kSamplesPerTick = 24;
+
+daw::Note testNote(std::uint32_t startTick, std::uint32_t lengthTicks, std::uint8_t pitch = 69,
+                   std::uint8_t track = 0) {
+    daw::Note note{};
+    note.startTick = startTick;
+    note.lengthTicks = lengthTicks;
+    note.pitch = pitch;
+    note.track = track;
+    note.velocity = 1.0f;
+    return note;
+}
+
+// A track configured to make onsets easy to see: square wave, instant attack,
+// full sustain, near-instant release.
+void makeAudible(daw::Engine& engine, std::size_t index) {
+    engine.track(index).synth().setWaveform(daw::Waveform::Square);
+    engine.track(index).synth().setEnvelopeParameters({0.0f, 1000.0f, 1.0f, 1.0f});
 }
 
 float peakBetween(const std::vector<float>& samples, std::size_t from, std::size_t to) {
@@ -1141,18 +1165,18 @@ void testMuteAndSoloResolveAcrossTracks() {
 
     check(engine.track(0).isActive() && engine.track(1).isActive(), "tracks should start audible");
 
-    check(engine.pushCommand({daw::CommandType::SetTrackMute, 0.0f, 1, 0, 0}), "queue mute");
+    check(engine.pushCommand({daw::CommandType::SetTrackMute, 0.0f, 1, 0}), "queue mute");
     (void)renderEngine(engine, 128, 128);
     check(!engine.track(0).isActive(), "muting a track should take it out of the mix");
     check(engine.track(1).isActive(), "muting one track should not affect another");
 
-    check(engine.pushCommand({daw::CommandType::SetTrackMute, 0.0f, 0, 0, 0}), "queue unmute");
-    check(engine.pushCommand({daw::CommandType::SetTrackSolo, 0.0f, 1, 1, 0}), "queue solo on track 1");
+    check(engine.pushCommand({daw::CommandType::SetTrackMute, 0.0f, 0, 0}), "queue unmute");
+    check(engine.pushCommand({daw::CommandType::SetTrackSolo, 0.0f, 1, 1}), "queue solo on track 1");
     (void)renderEngine(engine, 128, 128);
     check(!engine.track(0).isActive(), "soloing one track should silence the others");
     check(engine.track(1).isActive(), "the soloed track should stay audible");
 
-    check(engine.pushCommand({daw::CommandType::SetTrackSolo, 0.0f, 0, 1, 0}), "queue solo off");
+    check(engine.pushCommand({daw::CommandType::SetTrackSolo, 0.0f, 0, 1}), "queue solo off");
     (void)renderEngine(engine, 128, 128);
     check(engine.track(0).isActive() && engine.track(1).isActive(),
           "clearing solo should restore every unmuted track");
@@ -1160,126 +1184,316 @@ void testMuteAndSoloResolveAcrossTracks() {
 
 void testScheduledNoteLandsOnTheExactSample() {
     constexpr std::size_t kBlockSize = 128;
-    constexpr std::uint64_t kEventSample = 100; // deliberately mid-block
+    constexpr std::uint32_t kStartTick = 5; // 120 samples in, deliberately mid-block
 
     daw::Engine engine;
     engine.prepare(48000.0, kBlockSize);
     (void)engine.addTrack();
-    engine.track(0).synth().setEnvelopeParameters({0.0f, 1000.0f, 1.0f, 5.0f});
-    engine.track(0).synth().setWaveform(daw::Waveform::Square);
+    makeAudible(engine, 0);
+    engine.transport().setTempo(kTestBpm);
 
-    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0, 0}), "queue play");
-    check(engine.pushCommand({daw::CommandType::NoteOn, 1.0f, 69, 0, true, kEventSample}), "queue scheduled note");
-    check(engine.scheduledEventCount() == 0, "nothing is scheduled until the queue is drained");
+    check(engine.timeline().addNote(testNote(kStartTick, 40)), "adding a note should succeed");
+    check(engine.compileTimeline(), "compiling the arrangement should publish a schedule");
+    check(engine.scheduledEventCount() == 2, "one note should compile to a note on and a note off");
+
+    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0}), "queue play");
 
     const std::vector<float> rendered = renderEngine(engine, 512, kBlockSize);
-
-    check(engine.scheduledEventCount() == 1, "the scheduled event should be held until its time arrives");
+    const std::size_t onset = static_cast<std::size_t>(kStartTick * kSamplesPerTick);
 
     // If scheduling were quantised to the block, the note would have started
-    // at sample 0 or sample 128. Silence right up to 99 and energy just after
-    // 100 is only possible if the block was split at the event.
-    check(peakBetween(rendered, 0, kEventSample) == 0.0f,
-          "nothing should sound before a scheduled event's exact sample");
-    check(peakBetween(rendered, kEventSample, kEventSample + 40) > 0.01f,
-          "a scheduled note should start within a few samples of its timestamp, not at the next block boundary");
+    // at sample 0 or sample 128. Silence right up to the tick and energy just
+    // after it is only possible if the block was split at the event.
+    check(peakBetween(rendered, 0, onset) == 0.0f,
+          "nothing should sound before a scheduled note's exact sample");
+    check(peakBetween(rendered, onset, onset + 40) > 0.01f,
+          "a scheduled note should start at its timestamp, not at the next block boundary");
 }
 
 void testScheduledEventsAreIgnoredWhileStopped() {
     daw::Engine engine;
     engine.prepare(48000.0, 128);
     (void)engine.addTrack();
-    engine.track(0).synth().setWaveform(daw::Waveform::Square);
+    makeAudible(engine, 0);
+    engine.transport().setTempo(kTestBpm);
 
-    // No TransportPlay: the playhead never reaches the event.
-    check(engine.pushCommand({daw::CommandType::NoteOn, 1.0f, 69, 0, true, 100}), "queue scheduled note");
+    // No TransportPlay: the playhead never reaches the note.
+    check(engine.timeline().addNote(testNote(5, 40)), "add note");
+    check(engine.compileTimeline(), "compile");
     const std::vector<float> rendered = renderEngine(engine, 1024, 128);
 
     check(peakBetween(rendered, 0, 1024) == 0.0f,
-          "a scheduled event should not fire while the transport is stopped");
+          "a scheduled note should not fire while the transport is stopped");
     check(engine.transport().position() == 0, "a stopped transport should not advance");
 
-    // The case that actually bites: an event sitting exactly on the stopped
+    // The case that actually bites: a note sitting exactly on the stopped
     // playhead. It must wait rather than fire into silence and be spent by
     // the time the user presses play.
     daw::Engine atZero;
     atZero.prepare(48000.0, 128);
     (void)atZero.addTrack();
-    atZero.track(0).synth().setWaveform(daw::Waveform::Square);
-    atZero.track(0).synth().setEnvelopeParameters({0.0f, 1000.0f, 1.0f, 5.0f});
+    makeAudible(atZero, 0);
+    atZero.transport().setTempo(kTestBpm);
 
-    check(atZero.pushCommand({daw::CommandType::NoteOn, 1.0f, 69, 0, true, 0}), "queue note at sample zero");
+    check(atZero.timeline().addNote(testNote(0, 40)), "add note at tick zero");
+    check(atZero.compileTimeline(), "compile");
     const std::vector<float> whileStopped = renderEngine(atZero, 1024, 128);
     check(peakBetween(whileStopped, 0, 1024) == 0.0f,
-          "an event on sample zero should stay pending while stopped, not fire under a parked playhead");
+          "a note on tick zero should stay pending while stopped, not fire under a parked playhead");
 
-    check(atZero.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0, false, 0}), "queue play");
+    check(atZero.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0}), "queue play");
     const std::vector<float> afterPlay = renderEngine(atZero, 1024, 128);
     check(peakBetween(afterPlay, 0, 1024) > 0.01f,
-          "the same event should fire as soon as the transport starts moving");
+          "the same note should fire as soon as the transport starts moving");
 }
 
 void testTransportLoopWrapsAndRearmsEvents() {
-    constexpr std::uint64_t kLoopLength = 2000;
+    constexpr std::uint32_t kLoopTicks = 100; // 2400 samples
+    const std::size_t loopSamples = static_cast<std::size_t>(kLoopTicks * kSamplesPerTick);
 
     daw::Engine engine;
     engine.prepare(48000.0, 128);
     (void)engine.addTrack();
-    engine.track(0).synth().setWaveform(daw::Waveform::Square);
-    engine.track(0).synth().setEnvelopeParameters({0.0f, 1000.0f, 1.0f, 1.0f});
+    makeAudible(engine, 0);
+    engine.transport().setTempo(kTestBpm);
 
-    engine.transport().setLoop(0, kLoopLength);
-    check(engine.pushCommand({daw::CommandType::TransportSetLoop, 0.0f, 1, 0, 0}), "queue loop on");
-    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0, 0}), "queue play");
-    check(engine.pushCommand({daw::CommandType::NoteOn, 1.0f, 69, 0, true, 100}), "queue note on at 100");
-    check(engine.pushCommand({daw::CommandType::NoteOff, 0.0f, 69, 0, true, 300}), "queue note off at 300");
+    check(engine.timeline().addNote(testNote(5, 10)), "add note inside the loop");
+    check(engine.compileTimeline(), "compile");
+    engine.setLoopTicks(0, kLoopTicks);
 
-    const std::vector<float> rendered = renderEngine(engine, kLoopLength * 3, 128);
+    check(engine.pushCommand({daw::CommandType::TransportSetLoop, 0.0f, 1, 0}), "queue loop on");
+    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0}), "queue play");
 
-    // The same event must sound once per pass, which only happens if looping
-    // re-arms events inside the loop range.
+    const std::vector<float> rendered = renderEngine(engine, loopSamples * 3, 128);
+
     bool everyPassSounded = true;
     bool everyPassWentQuiet = true;
-    for (std::uint64_t pass = 0; pass < 3; ++pass) {
-        const std::size_t base = static_cast<std::size_t>(pass * kLoopLength);
-        if (peakBetween(rendered, base + 120, base + 290) < 0.01f) everyPassSounded = false;
-        if (peakBetween(rendered, base + 700, base + 1900) > 0.01f) everyPassWentQuiet = false;
+    for (std::size_t pass = 0; pass < 3; ++pass) {
+        const std::size_t base = pass * loopSamples;
+        if (peakBetween(rendered, base + 130, base + 350) < 0.01f) everyPassSounded = false;
+        if (peakBetween(rendered, base + 600, base + loopSamples - 50) > 0.01f) everyPassWentQuiet = false;
     }
-    check(everyPassSounded, "an event inside the loop range should fire again on every pass");
+    check(everyPassSounded, "a note inside the loop range should sound again on every pass");
     check(everyPassWentQuiet, "the gap after the note should stay silent on every pass");
-    check(engine.transport().position() < kLoopLength, "the playhead should wrap inside the loop range");
+    check(engine.transport().position() < loopSamples, "the playhead should wrap inside the loop range");
 }
 
-// Regression: an event on sample zero is an ordinary timeline position, not a
-// live gesture. Overloading a zero timestamp to mean "immediate" made the
-// first event of a loop fire once and never repeat, which only showed up as a
-// missing note on passes two onward.
-void testEventOnSampleZeroRepeatsEveryLoopPass() {
-    constexpr std::uint64_t kLoopLength = 2000;
+// Regression: a note on tick zero is an ordinary timeline position, not a
+// live gesture. An earlier design overloaded a zero timestamp to mean
+// "immediate", which made the first note of a loop fire once and never repeat.
+void testNoteOnTickZeroRepeatsEveryLoopPass() {
+    constexpr std::uint32_t kLoopTicks = 100;
+    const std::size_t loopSamples = static_cast<std::size_t>(kLoopTicks * kSamplesPerTick);
 
     daw::Engine engine;
     engine.prepare(48000.0, 128);
     (void)engine.addTrack();
-    engine.track(0).synth().setWaveform(daw::Waveform::Square);
-    engine.track(0).synth().setEnvelopeParameters({0.0f, 1000.0f, 1.0f, 1.0f});
+    makeAudible(engine, 0);
+    engine.transport().setTempo(kTestBpm);
 
-    engine.transport().setLoop(0, kLoopLength);
-    check(engine.pushCommand({daw::CommandType::TransportSetLoop, 0.0f, 1, 0, false, 0}), "queue loop on");
-    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0, false, 0}), "queue play");
+    check(engine.timeline().addNote(testNote(0, 15)), "add note on tick zero");
+    check(engine.compileTimeline(), "compile");
+    engine.setLoopTicks(0, kLoopTicks);
 
-    // The distinguishing case: timestamp zero, explicitly scheduled.
-    check(engine.pushCommand({daw::CommandType::NoteOn, 1.0f, 69, 0, true, 0}), "queue note on at sample zero");
-    check(engine.pushCommand({daw::CommandType::NoteOff, 0.0f, 69, 0, true, 400}), "queue note off");
+    check(engine.pushCommand({daw::CommandType::TransportSetLoop, 0.0f, 1, 0}), "queue loop on");
+    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0}), "queue play");
 
-    const std::vector<float> rendered = renderEngine(engine, kLoopLength * 3, 128);
-    check(engine.scheduledEventCount() == 2, "an event at sample zero should live in the schedule, not fire immediately");
+    const std::vector<float> rendered = renderEngine(engine, loopSamples * 3, 128);
 
     bool everyPassSounded = true;
-    for (std::uint64_t pass = 0; pass < 3; ++pass) {
-        const std::size_t base = static_cast<std::size_t>(pass * kLoopLength);
-        if (peakBetween(rendered, base + 20, base + 380) < 0.01f) everyPassSounded = false;
+    for (std::size_t pass = 0; pass < 3; ++pass) {
+        const std::size_t base = pass * loopSamples;
+        if (peakBetween(rendered, base + 20, base + 330) < 0.01f) everyPassSounded = false;
     }
-    check(everyPassSounded, "a note scheduled on sample zero should sound on every loop pass, not just the first");
+    check(everyPassSounded, "a note on tick zero should sound on every loop pass, not just the first");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: timeline, musical time, cursor scheduling
+// ---------------------------------------------------------------------------
+
+void testTicksConvertToSamplesAtTempo() {
+    // A quarter note at 125 BPM is 0.48 s, which is 23040 samples at 48 kHz.
+    check(daw::Timeline::ticksToSamples(daw::Timeline::kTicksPerQuarter, 48000.0, 125.0) == 23040,
+          "a quarter note should convert to the expected sample count");
+    check(daw::Timeline::ticksToSamples(1, 48000.0, 125.0) == kSamplesPerTick,
+          "a single tick should convert exactly at the tempo the tests use");
+    check(daw::Timeline::ticksToSamples(0, 48000.0, 125.0) == 0, "tick zero should be sample zero");
+
+    // Doubling the tempo halves the wall-clock position of the same tick.
+    const std::uint64_t slow = daw::Timeline::ticksToSamples(960, 48000.0, 100.0);
+    const std::uint64_t fast = daw::Timeline::ticksToSamples(960, 48000.0, 200.0);
+    check(slow == fast * 2, "the same musical position should land twice as early at double tempo");
+}
+
+void testTimelineRejectsBadNotesAndRespectsCapacity() {
+    daw::Timeline timeline;
+    timeline.prepare();
+
+    check(!timeline.addNote(testNote(0, 0)), "a zero-length note should be refused, since it would never release");
+    check(timeline.noteCount() == 0, "a refused note should not be stored");
+
+    // One assertion for one property: a per-iteration check here would add
+    // hundreds to the suite's count without adding anything it proves.
+    bool allAccepted = true;
+    for (std::size_t i = 0; i < daw::Timeline::kMaxNotes; ++i) {
+        if (!timeline.addNote(testNote(static_cast<std::uint32_t>(i), 1))) allAccepted = false;
+    }
+    check(allAccepted, "adding notes up to capacity should succeed");
+    check(timeline.noteCount() == daw::Timeline::kMaxNotes, "the timeline should fill to exactly its capacity");
+    check(!timeline.addNote(testNote(1, 1)), "adding past capacity should fail rather than overrun");
+
+    timeline.clear();
+    check(timeline.noteCount() == 0, "clear should empty the arrangement");
+}
+
+void testClearTrackRemovesOnlyThatTrack() {
+    daw::Timeline timeline;
+    timeline.prepare();
+
+    check(timeline.addNote(testNote(0, 10, 60, 0)), "add to track 0");
+    check(timeline.addNote(testNote(10, 10, 62, 1)), "add to track 1");
+    check(timeline.addNote(testNote(20, 10, 64, 0)), "add to track 0 again");
+
+    timeline.clearTrack(0);
+    check(timeline.noteCount() == 1, "clearing a track should remove exactly its own notes");
+    check(timeline.note(0).track == 1, "the surviving note should belong to the other track");
+}
+
+void testCompileProducesSortedEvents() {
+    daw::Timeline timeline;
+    timeline.prepare();
+
+    // Added deliberately out of order.
+    check(timeline.addNote(testNote(40, 10)), "add later note first");
+    check(timeline.addNote(testNote(0, 10)), "add earlier note second");
+    check(timeline.addNote(testNote(20, 10)), "add middle note last");
+
+    check(timeline.compile(48000.0, kTestBpm), "compile should publish");
+
+    const daw::Timeline::Schedule* schedule = timeline.peek();
+    check(schedule != nullptr, "a compiled schedule should be readable");
+    check(schedule->count == 6, "three notes should compile to six events");
+
+    bool sorted = true;
+    for (std::size_t i = 1; i < schedule->count; ++i) {
+        if (schedule->events[i].time < schedule->events[i - 1].time) sorted = false;
+    }
+    check(sorted, "the compiled schedule must be sorted by time for a cursor to walk it");
+}
+
+// The ordering trap: a note that ends exactly where the next one begins. If a
+// note-on is allowed to run before the note-off at the same sample, the off
+// lands on the voice that just started and kills it.
+void testBackToBackSameNotesBothSound() {
+    daw::Timeline timeline;
+    timeline.prepare();
+
+    check(timeline.addNote(testNote(0, 10, 69)), "first note");
+    check(timeline.addNote(testNote(10, 10, 69)), "second note starting where the first ends");
+    check(timeline.compile(48000.0, kTestBpm), "compile");
+
+    const daw::Timeline::Schedule* schedule = timeline.peek();
+    check(schedule != nullptr, "schedule should exist");
+
+    // At the shared boundary the note-off has to come first.
+    const std::uint64_t boundary = 10 * kSamplesPerTick;
+    int offIndex = -1;
+    int onIndex = -1;
+    for (std::size_t i = 0; i < schedule->count; ++i) {
+        if (schedule->events[i].time != boundary) continue;
+        if (schedule->events[i].command.type == daw::CommandType::NoteOff && offIndex < 0) {
+            offIndex = static_cast<int>(i);
+        }
+        if (schedule->events[i].command.type == daw::CommandType::NoteOn && onIndex < 0) {
+            onIndex = static_cast<int>(i);
+        }
+    }
+    check(offIndex >= 0 && onIndex >= 0, "both events should land on the shared boundary");
+    check(offIndex < onIndex, "the note off must be ordered before the note on at the same sample");
+
+    // And it has to actually sound: the second note must still be audible.
+    daw::Engine engine;
+    engine.prepare(48000.0, 128);
+    (void)engine.addTrack();
+    makeAudible(engine, 0);
+    engine.transport().setTempo(kTestBpm);
+    check(engine.timeline().addNote(testNote(0, 10, 69)), "first note");
+    check(engine.timeline().addNote(testNote(10, 10, 69)), "second note");
+    check(engine.compileTimeline(), "compile");
+    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0}), "play");
+
+    const std::vector<float> rendered = renderEngine(engine, 800, 128);
+    check(peakBetween(rendered, 260, 460) > 0.01f,
+          "the second of two back-to-back notes on the same pitch should still sound");
+}
+
+void testSeekRepositionsTheCursor() {
+    daw::Engine engine;
+    engine.prepare(48000.0, 128);
+    (void)engine.addTrack();
+    makeAudible(engine, 0);
+    engine.transport().setTempo(kTestBpm);
+
+    // A note early and a note late; seeking past the first should not consume
+    // or skip the second.
+    check(engine.timeline().addNote(testNote(2, 10)), "early note");
+    check(engine.timeline().addNote(testNote(100, 20)), "late note");
+    check(engine.compileTimeline(), "compile");
+
+    const std::uint64_t seekTo = 50 * kSamplesPerTick; // between the two notes
+    check(engine.pushCommand({daw::CommandType::TransportSetPosition, 0.0f,
+                              static_cast<std::int32_t>(seekTo), 0}),
+          "queue seek");
+    check(engine.pushCommand({daw::CommandType::TransportPlay, 0.0f, 0, 0}), "queue play");
+
+    const std::vector<float> rendered = renderEngine(engine, 2400, 128);
+
+    // The late note sits at tick 100, which is 1200 samples absolute, i.e.
+    // 1200 - 1200 = 0 samples into this render... measured from the seek.
+    const std::size_t lateOnset = static_cast<std::size_t>(100 * kSamplesPerTick - seekTo);
+    check(peakBetween(rendered, lateOnset, lateOnset + 300) > 0.01f,
+          "a note after the seek point should still fire once the cursor is repositioned");
+}
+
+void testRecompileAtNewTempoMovesNotesInTime() {
+    daw::Engine engine;
+    engine.prepare(48000.0, 128);
+    (void)engine.addTrack();
+    makeAudible(engine, 0);
+
+    check(engine.timeline().addNote(testNote(20, 10)), "add note");
+
+    engine.transport().setTempo(kTestBpm);
+    check(engine.compileTimeline(), "compile at the base tempo");
+    const std::uint64_t slowTime = engine.timeline().peek()->events[0].time;
+
+    engine.transport().setTempo(kTestBpm * 2.0);
+    check(engine.compileTimeline(), "recompile at double tempo");
+    const std::uint64_t fastTime = engine.timeline().peek()->events[0].time;
+
+    check(slowTime == fastTime * 2,
+          "the same note should land twice as early at double tempo, without the host resending it");
+}
+
+void testTrackMetersFollowTheirOwnAudio() {
+    daw::Engine engine;
+    engine.prepare(48000.0, 128);
+    (void)engine.addTrack();
+    (void)engine.addTrack();
+    makeAudible(engine, 0);
+    makeAudible(engine, 1);
+
+    engine.track(0).synth().noteOn(60, 1.0f);
+    (void)renderEngine(engine, 1024, 128);
+
+    check(engine.track(0).peakLevel() > 0.01f, "a sounding track should show level on its own meter");
+    check(engine.track(1).peakLevel() < 0.01f, "a silent track's meter should stay down");
+
+    // And the meter should fall back once the sound stops.
+    engine.track(0).synth().allNotesOff();
+    (void)renderEngine(engine, 8192, 128);
+    check(engine.track(0).peakLevel() < 0.01f, "a meter should decay back to rest after the sound stops");
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,18 +1533,18 @@ void testAudioThreadNeverAllocates() {
         // pool exhaustion and stealing, and parameter changes through the
         // queue, all while the block size keeps changing underneath.
         const int note = 48 + (block % 40);
-        (void)engine.pushCommand({daw::CommandType::NoteOn, 0.8f, note, static_cast<std::uint8_t>(block % 2), 0});
+        (void)engine.pushCommand({daw::CommandType::NoteOn, 0.8f, note, static_cast<std::uint8_t>(block % 2)});
         if (block % 3 == 0) {
-            (void)engine.pushCommand({daw::CommandType::NoteOff, 0.0f, 48 + ((block - 3) % 40), 0, 0});
+            (void)engine.pushCommand({daw::CommandType::NoteOff, 0.0f, 48 + ((block - 3) % 40), 0});
         }
         if (block % 7 == 0) {
-            (void)engine.pushCommand({daw::CommandType::SetFilterCutoff, 200.0f + static_cast<float>(block), 0, 0, 0});
-            (void)engine.pushCommand({daw::CommandType::SetAttack, 1.0f + static_cast<float>(block % 50), 0, 0, 0});
-            (void)engine.pushCommand({daw::CommandType::SetWaveform, 0.0f, block % 3, 0, 0});
-            (void)engine.pushCommand({daw::CommandType::SetTrackPan, (block % 2 == 0) ? -0.5f : 0.5f, 0, 1, 0});
+            (void)engine.pushCommand({daw::CommandType::SetFilterCutoff, 200.0f + static_cast<float>(block), 0, 0});
+            (void)engine.pushCommand({daw::CommandType::SetAttack, 1.0f + static_cast<float>(block % 50), 0, 0});
+            (void)engine.pushCommand({daw::CommandType::SetWaveform, 0.0f, block % 3, 0});
+            (void)engine.pushCommand({daw::CommandType::SetTrackPan, (block % 2 == 0) ? -0.5f : 0.5f, 0, 1});
         }
         if (block % 97 == 0) {
-            (void)engine.pushCommand({daw::CommandType::AllNotesOff, 0.0f, 0, 0, 0});
+            (void)engine.pushCommand({daw::CommandType::AllNotesOff, 0.0f, 0, 0});
         }
 
         daw::AudioBuffer buffer(channels, 2, blockSizes[block % 5]);
@@ -1402,7 +1616,16 @@ int main() {
     testScheduledNoteLandsOnTheExactSample();
     testScheduledEventsAreIgnoredWhileStopped();
     testTransportLoopWrapsAndRearmsEvents();
-    testEventOnSampleZeroRepeatsEveryLoopPass();
+    testNoteOnTickZeroRepeatsEveryLoopPass();
+
+    testTicksConvertToSamplesAtTempo();
+    testTimelineRejectsBadNotesAndRespectsCapacity();
+    testClearTrackRemovesOnlyThatTrack();
+    testCompileProducesSortedEvents();
+    testBackToBackSameNotesBothSound();
+    testSeekRepositionsTheCursor();
+    testRecompileAtNewTempoMovesNotesInTime();
+    testTrackMetersFollowTheirOwnAudio();
 
     testAudioThreadNeverAllocates();
 

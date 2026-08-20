@@ -1,19 +1,11 @@
 #include "daw/Graph.hpp"
 
-// Sleeping is only ever done by the message thread of a native host. Pulling
-// <thread> into the WASM build would add wasi_snapshot_preview1 imports that a
-// standalone module has no host to satisfy, and the browser never takes this
-// path anyway.
-#if !defined(__EMSCRIPTEN__)
-#include <chrono>
-#include <thread>
-#endif
-
 namespace daw {
 
 void Graph::prepare(double sampleRate, std::size_t maxBlockSize, std::size_t numChannels) {
     sampleRate_ = sampleRate;
     maxBlockSize_ = maxBlockSize;
+    plans_.prepare();
 
     // Sized for the worst case up front so that adding a node later is never
     // an allocation, and so the pointers a live plan holds stay valid.
@@ -61,36 +53,6 @@ bool Graph::disconnect(NodeId source, NodeId destination) {
     return false;
 }
 
-// Waits for the audio thread to stop reading a slot before it is rewritten.
-// Message thread only: sleeping here is fine, and a graph edit is rare.
-bool Graph::retireSlot(int slot) {
-    if (slot < 0) return true;
-    if (consumedPlan_.load(std::memory_order_acquire) != slot) return true;
-
-#if defined(__EMSCRIPTEN__)
-    // In an AudioWorklet, rebuild() would be called from the port's message
-    // handler, which shares the audio thread with process(). Blocking there
-    // is exactly the dropout this whole design exists to avoid, so refuse the
-    // edit and let the caller retry on a later message instead.
-    return false;
-#else
-    // A running stream at 48 kHz with 128-frame blocks produces a block every
-    // 2.67 ms, so a 5 ms window with no progress means rendering is stopped
-    // and nobody can be inside process().
-    constexpr auto kProbe = std::chrono::milliseconds(5);
-    constexpr int kMaxAttempts = 200; // one second, then give up rather than hang
-
-    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-        const std::uint64_t before = renderCount_.load(std::memory_order_acquire);
-        std::this_thread::sleep_for(kProbe);
-
-        if (consumedPlan_.load(std::memory_order_acquire) != slot) return true;
-        if (renderCount_.load(std::memory_order_acquire) == before) return true;
-    }
-    return false;
-#endif
-}
-
 bool Graph::rebuild() {
     // Kahn's algorithm. Everything here is a fixed-size array so the sort has
     // the same shape whether it runs in a test or on a loaded machine.
@@ -126,9 +88,13 @@ bool Graph::rebuild() {
     // cannot be walked.
     if (orderCount != numNodes_) return false;
 
-    if (!retireSlot(writeSlot_)) return false;
+    // A null slot means the audio thread has not let go of the one we would
+    // overwrite. Refusing here leaves the running plan alone, which is always
+    // a safe answer.
+    Plan* staging = plans_.beginEdit();
+    if (staging == nullptr) return false;
 
-    Plan& plan = plans_[static_cast<std::size_t>(writeSlot_)];
+    Plan& plan = *staging;
     plan.entryCount = 0;
     plan.inputCount = 0;
 
@@ -152,28 +118,20 @@ bool Graph::rebuild() {
     plan.hasOutput = outputNode_ < numNodes_;
     plan.output = static_cast<std::uint8_t>(plan.hasOutput ? outputNode_ : 0);
 
-    livePlan_.store(writeSlot_, std::memory_order_release);
-    writeSlot_ = 1 - writeSlot_;
+    plans_.commit();
     return true;
 }
 
 void Graph::process(AudioBuffer& output) noexcept {
-    const int slot = livePlan_.load(std::memory_order_acquire);
-
-    // Tell the message thread which slot is in use before touching it, and
-    // count the block so it can tell a stalled stream from a busy one. Only
-    // this thread writes renderCount_, so a plain store beats a read-modify-
-    // write here.
-    consumedPlan_.store(slot, std::memory_order_release);
-    renderCount_.store(renderCount_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    const Plan* live = plans_.acquire();
 
     const std::size_t frames = output.numFrames();
-    if (slot < 0 || frames > maxBlockSize_) {
+    if (live == nullptr || frames > maxBlockSize_) {
         output.clear();
         return;
     }
 
-    const Plan& plan = plans_[static_cast<std::size_t>(slot)];
+    const Plan& plan = *live;
 
     for (std::size_t i = 0; i < plan.entryCount; ++i) {
         const Entry& entry = plan.entries[i];
@@ -201,18 +159,14 @@ void Graph::process(AudioBuffer& output) noexcept {
 }
 
 std::size_t Graph::planLength() const noexcept {
-    const int slot = livePlan_.load(std::memory_order_acquire);
-    if (slot < 0) return 0;
-    return plans_[static_cast<std::size_t>(slot)].entryCount;
+    const Plan* plan = plans_.peek();
+    return plan == nullptr ? 0 : plan->entryCount;
 }
 
 std::size_t Graph::planOrder(std::size_t position) const noexcept {
-    const int slot = livePlan_.load(std::memory_order_acquire);
-    if (slot < 0) return kInvalidNode;
-
-    const Plan& plan = plans_[static_cast<std::size_t>(slot)];
-    if (position >= plan.entryCount) return kInvalidNode;
-    return plan.entries[position].node;
+    const Plan* plan = plans_.peek();
+    if (plan == nullptr || position >= plan->entryCount) return kInvalidNode;
+    return plan->entries[position].node;
 }
 
 } // namespace daw

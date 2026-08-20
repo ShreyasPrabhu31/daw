@@ -18,6 +18,7 @@ add_library(daw_engine STATIC
     engine/src/MasterBus.cpp
     engine/src/Oscillator.cpp
     engine/src/Synth.cpp
+    engine/src/Timeline.cpp
     engine/src/Track.cpp
     engine/src/Voice.cpp
 )

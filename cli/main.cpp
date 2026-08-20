@@ -1,5 +1,6 @@
 #include "daw/AudioBuffer.hpp"
 #include "daw/Engine.hpp"
+#include "daw/Timeline.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -153,49 +154,58 @@ int main(int argc, char** argv) {
                               ? 0.0f
                               : -1.0f + 2.0f * static_cast<float>(t) / static_cast<float>(args.numTracks - 1);
         const auto track = static_cast<std::uint8_t>(t);
-        queueOrWarn(engine, {daw::CommandType::SetTrackPan, pan, 0, track, 0}, "pan");
-        queueOrWarn(engine, {daw::CommandType::SetWaveform, 0.0f, parseWaveform(args.wave), track, 0}, "waveform");
-        queueOrWarn(engine, {daw::CommandType::SetAttack, args.attackMs, 0, track, 0}, "attack");
-        queueOrWarn(engine, {daw::CommandType::SetDecay, args.decayMs, 0, track, 0}, "decay");
-        queueOrWarn(engine, {daw::CommandType::SetSustain, args.sustain, 0, track, 0}, "sustain");
-        queueOrWarn(engine, {daw::CommandType::SetRelease, args.releaseMs, 0, track, 0}, "release");
-        queueOrWarn(engine, {daw::CommandType::SetFilterCutoff, args.cutoffHz, 0, track, 0}, "cutoff");
-        queueOrWarn(engine, {daw::CommandType::SetFilterResonance, args.resonance, 0, track, 0}, "resonance");
+        queueOrWarn(engine, {daw::CommandType::SetTrackPan, pan, 0, track}, "pan");
+        queueOrWarn(engine, {daw::CommandType::SetWaveform, 0.0f, parseWaveform(args.wave), track}, "waveform");
+        queueOrWarn(engine, {daw::CommandType::SetAttack, args.attackMs, 0, track}, "attack");
+        queueOrWarn(engine, {daw::CommandType::SetDecay, args.decayMs, 0, track}, "decay");
+        queueOrWarn(engine, {daw::CommandType::SetSustain, args.sustain, 0, track}, "sustain");
+        queueOrWarn(engine, {daw::CommandType::SetRelease, args.releaseMs, 0, track}, "release");
+        queueOrWarn(engine, {daw::CommandType::SetFilterCutoff, args.cutoffHz, 0, track}, "cutoff");
+        queueOrWarn(engine, {daw::CommandType::SetFilterResonance, args.resonance, 0, track}, "resonance");
     }
 
     if (args.noSaturation) {
-        queueOrWarn(engine, {daw::CommandType::SetMasterSaturation, 0.0f, 0, 0, 0}, "saturation");
+        queueOrWarn(engine, {daw::CommandType::SetMasterSaturation, 0.0f, 0, 0}, "saturation");
     }
 
     const std::size_t totalFrames = static_cast<std::size_t>(args.seconds * kSampleRate);
 
     if (args.arpSteps > 0) {
-        // Sample-accurate scheduling: every step lands on an exact sample,
-        // regardless of where the 128-frame block boundaries fall.
-        const double secondsPerStep = 60.0 / args.bpm / 2.0; // eighth notes
-        const auto framesPerStep = static_cast<std::uint64_t>(secondsPerStep * kSampleRate);
+        // The arrangement is musical: notes live in ticks, and the engine
+        // compiles them to sample positions at the transport's tempo. Every
+        // step lands on an exact sample regardless of block boundaries.
+        engine.transport().setTempo(args.bpm);
+
+        constexpr std::uint32_t kTicksPerStep = daw::Timeline::kTicksPerQuarter / 2; // eighth notes
 
         for (int step = 0; step < args.arpSteps; ++step) {
-            const int note = args.notes[static_cast<std::size_t>(step) % args.notes.size()];
-            const auto track = static_cast<std::uint8_t>(static_cast<std::size_t>(step) % args.numTracks);
-            const std::uint64_t onAt = static_cast<std::uint64_t>(step) * framesPerStep;
-            const std::uint64_t offAt = onAt + (framesPerStep * 3) / 4;
+            daw::Note note{};
+            note.startTick = static_cast<std::uint32_t>(step) * kTicksPerStep;
+            note.lengthTicks = (kTicksPerStep * 3) / 4;
+            note.pitch = static_cast<std::uint8_t>(args.notes[static_cast<std::size_t>(step) % args.notes.size()]);
+            note.track = static_cast<std::uint8_t>(static_cast<std::size_t>(step) % args.numTracks);
+            note.velocity = args.velocity;
 
-            queueOrWarn(engine, {daw::CommandType::NoteOn, args.velocity, note, track, true, onAt},
-                        "scheduled note on");
-            queueOrWarn(engine, {daw::CommandType::NoteOff, 0.0f, note, track, true, offAt},
-                        "scheduled note off");
+            if (!engine.timeline().addNote(note)) {
+                std::fprintf(stderr, "warning: timeline full at step %d\n", step);
+                break;
+            }
+        }
+
+        if (!engine.compileTimeline()) {
+            std::fprintf(stderr, "error: could not compile the arrangement\n");
+            return 1;
         }
 
         if (args.loop) {
-            engine.transport().setLoop(0, static_cast<std::uint64_t>(args.arpSteps) * framesPerStep);
-            queueOrWarn(engine, {daw::CommandType::TransportSetLoop, 0.0f, 1, 0, 0}, "loop");
+            engine.setLoopTicks(0, static_cast<std::uint32_t>(args.arpSteps) * kTicksPerStep);
+            queueOrWarn(engine, {daw::CommandType::TransportSetLoop, 0.0f, 1, 0}, "loop");
         }
-        queueOrWarn(engine, {daw::CommandType::TransportPlay, 0.0f, 0, 0, 0}, "play");
+        queueOrWarn(engine, {daw::CommandType::TransportPlay, 0.0f, 0, 0}, "play");
     } else {
         for (std::size_t n = 0; n < args.notes.size(); ++n) {
             const auto track = static_cast<std::uint8_t>(n % args.numTracks);
-            queueOrWarn(engine, {daw::CommandType::NoteOn, args.velocity, args.notes[n], track, 0}, "note on");
+            queueOrWarn(engine, {daw::CommandType::NoteOn, args.velocity, args.notes[n], track}, "note on");
         }
     }
 
@@ -216,7 +226,7 @@ int main(int argc, char** argv) {
         if (args.arpSteps == 0 && !released && framesRendered >= releaseFrame) {
             for (std::size_t n = 0; n < args.notes.size(); ++n) {
                 const auto track = static_cast<std::uint8_t>(n % args.numTracks);
-                queueOrWarn(engine, {daw::CommandType::NoteOff, 0.0f, args.notes[n], track, 0}, "note off");
+                queueOrWarn(engine, {daw::CommandType::NoteOff, 0.0f, args.notes[n], track}, "note off");
             }
             released = true;
         }
