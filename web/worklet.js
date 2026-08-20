@@ -63,17 +63,14 @@ class DawProcessor extends AudioWorkletProcessor {
       case 'allNotesOff':
         this.exports.daw_all_notes_off();
         return;
-      case 'scheduleNoteOn':
-        this.exports.daw_schedule_note_on(data.track, data.note, data.velocity, data.time);
+      case 'setTimeline':
+        this._setTimeline(data.notes);
         return;
-      case 'scheduleNoteOff':
-        this.exports.daw_schedule_note_off(data.track, data.note, data.time);
+      case 'setTempo':
+        this.exports.daw_set_tempo(data.value);
         return;
-      case 'clearScheduled':
-        this.exports.daw_clear_scheduled_events();
-        return;
-      case 'setLoopRange':
-        this.exports.daw_set_loop_range(data.start, data.end);
+      case 'setLoopTicks':
+        this.exports.daw_set_loop_ticks(data.start, data.end);
         return;
       case 'transportPlay':
         this.exports.daw_transport_play();
@@ -90,6 +87,25 @@ class DawProcessor extends AudioWorkletProcessor {
     } else if (this.globalSetters[type]) {
       this.exports[this.globalSetters[type]](data.value);
     }
+  }
+
+  // Rewrites the whole arrangement. Cheaper and far simpler than diffing, and
+  // the engine sorts it into a schedule once at the end rather than per note.
+  _setTimeline(notes) {
+    this.exports.daw_timeline_clear();
+    for (const note of notes) {
+      this.exports.daw_timeline_add_note(note.track, note.pitch, note.startTick, note.lengthTicks, note.velocity);
+    }
+
+    // A refusal means the audio thread still holds the slot being rewritten,
+    // so the caller retries rather than the engine blocking here.
+    const ok = this.exports.daw_timeline_compile() === 1;
+    this.port.postMessage({
+      type: 'compiled',
+      ok,
+      notes: this.exports.daw_timeline_note_count(),
+      events: this.exports.daw_timeline_event_count(),
+    });
   }
 
   async _init(wasmBytes) {
@@ -140,11 +156,16 @@ class DawProcessor extends AudioWorkletProcessor {
       this.blocksSinceReport = 0;
 
       const voices = [];
-      for (let i = 0; i < NUM_TRACKS; ++i) voices.push(this.exports.daw_active_voice_count(i));
+      const peaks = [];
+      for (let i = 0; i < NUM_TRACKS; ++i) {
+        voices.push(this.exports.daw_active_voice_count(i));
+        peaks.push(this.exports.daw_track_peak(i));
+      }
 
       this.port.postMessage({
         type: 'meter',
         voices,
+        peaks,
         peak: this.exports.daw_peak_level(),
         position: this.exports.daw_transport_position(),
         playing: this.exports.daw_transport_is_playing() === 1,

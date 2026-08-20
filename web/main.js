@@ -1,38 +1,32 @@
 // Main thread: the only place that can fetch(). Wasm bytes are fetched here
-// and handed to the worklet as a transferable ArrayBuffer.
+// and handed to both the worklet (live playback) and the bounce worker
+// (offline render) as transferable ArrayBuffers.
 const SAMPLE_RATE = 48000;
-const NUM_TRACKS = 4;
-const STEPS = 16;
 const LOWEST_NOTE = 48; // C3
 const COMPUTER_KEY_BASE = LOWEST_NOTE + 12;
-const HIGHEST_KEY_OFFSET = 16;
-const NUM_KEYS = 12 + HIGHEST_KEY_OFFSET + 1;
+const NUM_KEYS = 29;
 
-// Keyboard row mapped to a piano octave, the layout every tracker and DAW uses.
 const KEY_TO_OFFSET = {
   a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6,
   g: 7, y: 8, h: 9, u: 10, j: 11, k: 12,
   o: 13, l: 14, p: 15, ';': 16,
 };
 
-// One note per track, so a lit step is unambiguous about what it plays.
-const TRACK_NOTES = [36, 43, 55, 67];
-const TRACK_NAMES = ['Bass', 'Tenor', 'Alto', 'Lead'];
-
 let audioContext = null;
 let workletNode = null;
+let wasmBytesForWorker = null;
+let bounceWorker = null;
+
 let armedTrack = 0;
 let bpm = 110;
+let arrangement = null;
+let pianoRoll = null;
+let peakCache = null;
 
 const heldNotes = new Set();
-const pattern = Array.from({ length: NUM_TRACKS }, () => new Array(STEPS).fill(false));
 
 function isBlackKey(note) {
   return [1, 3, 6, 8, 10].includes(note % 12);
-}
-
-function framesPerStep() {
-  return Math.round((60 / bpm / 4) * SAMPLE_RATE); // sixteenth notes
 }
 
 function send(message) {
@@ -55,26 +49,37 @@ async function startAudio() {
     setStatus('error: engine.wasm not found (run wasm/build.sh first)');
     return;
   }
-  const wasmBytes = await response.arrayBuffer();
+  const bytes = await response.arrayBuffer();
+
+  // The worker needs its own copy: the worklet's is transferred away.
+  wasmBytesForWorker = bytes.slice(0);
 
   workletNode = new AudioWorkletNode(audioContext, 'daw-processor', {
     numberOfOutputs: 1,
     outputChannelCount: [2],
   });
   workletNode.connect(audioContext.destination);
+  workletNode.port.onmessage = (event) => handleWorkletMessage(event.data);
+  workletNode.port.postMessage({ type: 'init', wasmBytes: bytes }, [bytes]);
+}
 
-  workletNode.port.onmessage = (event) => {
-    const data = event.data;
-    if (data.type === 'ready') {
-      setStatus(`running (${data.tracks} tracks)`);
-      pushAllControls();
-      pushPattern();
-    } else if (data.type === 'meter') {
-      updateMeter(data);
+function handleWorkletMessage(data) {
+  if (data.type === 'ready') {
+    setStatus(`running (${data.tracks} tracks)`);
+    send({ type: 'setTempo', value: bpm });
+    pushAllControls();
+    syncArrangement();
+  } else if (data.type === 'compiled') {
+    if (!data.ok) {
+      // The audio thread still held the slot. Retrying on the next tick is
+      // enough, since a block boundary passes in well under a millisecond.
+      setTimeout(syncArrangement, 16);
+      return;
     }
-  };
-
-  workletNode.port.postMessage({ type: 'init', wasmBytes }, [wasmBytes]);
+    document.getElementById('note-count').textContent = `${data.notes} notes / ${data.events} events`;
+  } else if (data.type === 'meter') {
+    updateMeters(data);
+  }
 }
 
 function stopAudio() {
@@ -84,33 +89,37 @@ function stopAudio() {
   workletNode = null;
   heldNotes.clear();
   document.querySelectorAll('.key.held').forEach((el) => el.classList.remove('held'));
-  document.querySelectorAll('.step.playing').forEach((el) => el.classList.remove('playing'));
+  arrangement.setPlayhead(0, false);
   setStatus('stopped');
 }
 
-function updateMeter(data) {
+function updateMeters(data) {
   for (let t = 0; t < NUM_TRACKS; ++t) {
-    const el = document.getElementById(`voices-${t}`);
-    if (el) el.textContent = String(data.voices[t] ?? 0);
+    const bar = document.getElementById(`meter-${t}`);
+    if (bar) bar.style.width = `${Math.min(data.peaks[t] ?? 0, 1) * 100}%`;
+    const voices = document.getElementById(`voices-${t}`);
+    if (voices) voices.textContent = String(data.voices[t] ?? 0);
   }
 
   const fill = document.getElementById('peak-fill');
   fill.style.width = `${Math.min(data.peak, 1) * 100}%`;
   fill.classList.toggle('clipping', data.peak >= 0.999);
 
-  // Highlight the step the playhead is inside, which is the visible proof
-  // that the engine's transport and the pattern agree.
-  const stepIndex = data.playing
-    ? Math.floor(data.position / framesPerStep()) % STEPS
-    : -1;
-  document.querySelectorAll('.step').forEach((el) => {
-    el.classList.toggle('playing', Number(el.dataset.step) === stepIndex);
-  });
+  // Samples to ticks, so the playhead lines up with the musical grid.
+  const samplesPerTick = (60 / bpm / TICKS_PER_QUARTER) * SAMPLE_RATE;
+  arrangement.setPlayhead(data.position / samplesPerTick, data.playing);
 }
+
+function syncArrangement() {
+  if (!workletNode) return;
+  send({ type: 'setTimeline', notes: arrangement.toNotes() });
+}
+
+// --- keyboard ---
 
 function noteOn(track, note, velocity = 0.85) {
   const key = `${track}:${note}`;
-  if (heldNotes.has(key)) return; // ignore auto-repeat
+  if (heldNotes.has(key)) return;
   heldNotes.add(key);
   send({ type: 'noteOn', track, note, velocity });
   document.querySelector(`[data-note="${note}"]`)?.classList.add('held');
@@ -137,59 +146,32 @@ function buildKeyboard() {
     });
     key.addEventListener('pointerup', () => noteOff(armedTrack, note));
     key.addEventListener('pointercancel', () => noteOff(armedTrack, note));
-
     keyboard.appendChild(key);
   }
 }
 
-function buildSequencer() {
-  const grid = document.getElementById('sequencer');
-
-  for (let track = 0; track < NUM_TRACKS; ++track) {
-    const label = document.createElement('div');
-    label.className = 'seq-label';
-    label.textContent = TRACK_NAMES[track];
-    grid.appendChild(label);
-
-    for (let step = 0; step < STEPS; ++step) {
-      const cell = document.createElement('button');
-      cell.className = 'step';
-      cell.dataset.step = String(step);
-      cell.dataset.track = String(track);
-      if (step % 4 === 0) cell.classList.add('downbeat');
-
-      cell.addEventListener('click', () => {
-        pattern[track][step] = !pattern[track][step];
-        cell.classList.toggle('on', pattern[track][step]);
-        pushPattern();
-      });
-
-      grid.appendChild(cell);
+function setupComputerKeyboard() {
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      arrangement.removeSelected();
+      pianoRoll.setClip(null);
+      return;
     }
-  }
+    if (event.repeat || event.metaKey || event.ctrlKey) return;
+    const offset = KEY_TO_OFFSET[event.key.toLowerCase()];
+    if (offset === undefined) return;
+    event.preventDefault();
+    startAudio().then(() => noteOn(armedTrack, COMPUTER_KEY_BASE + offset));
+  });
+
+  window.addEventListener('keyup', (event) => {
+    const offset = KEY_TO_OFFSET[event.key.toLowerCase()];
+    if (offset === undefined) return;
+    noteOff(armedTrack, COMPUTER_KEY_BASE + offset);
+  });
 }
 
-// Rewrites the whole pattern as scheduled events. Each note is placed at an
-// exact sample, and the loop range is the pattern length, so the engine
-// re-arms the events every pass instead of the UI re-sending them.
-function pushPattern() {
-  if (!workletNode) return;
-
-  const step = framesPerStep();
-  const length = step * STEPS;
-
-  send({ type: 'clearScheduled' });
-  send({ type: 'setLoopRange', start: 0, end: length });
-
-  for (let track = 0; track < NUM_TRACKS; ++track) {
-    for (let i = 0; i < STEPS; ++i) {
-      if (!pattern[track][i]) continue;
-      const note = TRACK_NOTES[track];
-      send({ type: 'scheduleNoteOn', track, note, velocity: 0.85, time: i * step });
-      send({ type: 'scheduleNoteOff', track, note, time: i * step + Math.floor(step * 0.8) });
-    }
-  }
-}
+// --- controls ---
 
 function pushAllControls() {
   document.querySelectorAll('[data-param]').forEach((input) => sendControl(input));
@@ -214,11 +196,7 @@ function setupControls() {
   document.querySelectorAll('[data-toggle]').forEach((button) => {
     button.addEventListener('click', () => {
       const on = button.classList.toggle('on');
-      send({
-        type: button.dataset.toggle,
-        track: parseInt(button.dataset.track, 10),
-        value: on ? 1 : 0,
-      });
+      send({ type: button.dataset.toggle, track: parseInt(button.dataset.track, 10), value: on ? 1 : 0 });
     });
   });
 
@@ -226,7 +204,11 @@ function setupControls() {
   tempo.addEventListener('input', () => {
     bpm = parseFloat(tempo.value);
     document.getElementById('bpm-value').textContent = tempo.value;
-    pushPattern(); // event times are absolute, so a tempo change rewrites them
+    // Notes are stored in musical time, so a tempo change is a recompile of
+    // the same arrangement rather than the UI resending different positions.
+    send({ type: 'setTempo', value: bpm });
+    send({ type: 'setLoopTicks', start: 0, end: TOTAL_TICKS });
+    syncArrangement();
   });
 
   document.querySelectorAll('.arm').forEach((button) => {
@@ -239,35 +221,108 @@ function setupControls() {
   });
 }
 
-function setupComputerKeyboard() {
-  window.addEventListener('keydown', (event) => {
-    if (event.repeat || event.metaKey || event.ctrlKey) return;
-    const offset = KEY_TO_OFFSET[event.key.toLowerCase()];
-    if (offset === undefined) return;
-    event.preventDefault();
-    startAudio().then(() => noteOn(armedTrack, COMPUTER_KEY_BASE + offset));
-  });
+// --- offline bounce ---
 
-  window.addEventListener('keyup', (event) => {
-    const offset = KEY_TO_OFFSET[event.key.toLowerCase()];
-    if (offset === undefined) return;
-    noteOff(armedTrack, COMPUTER_KEY_BASE + offset);
+function collectTrackSettings() {
+  const read = (id, fallback) => {
+    const el = document.getElementById(id);
+    return el ? parseFloat(el.value) : fallback;
+  };
+  const settings = [];
+  for (let t = 0; t < NUM_TRACKS; ++t) {
+    settings.push({
+      waveform: parseInt(document.getElementById('waveform').value, 10),
+      attack: read('attack', 5),
+      decay: read('decay', 120),
+      sustain: read('sustain', 0.7),
+      release: read('release', 250),
+      filterType: parseInt(document.getElementById('filter-type').value, 10),
+      cutoff: read('cutoff', 4000),
+      resonance: read('resonance', 0.9),
+      gain: read(`gain-${t}`, 0.8),
+      pan: read(`pan-${t}`, 0),
+      muted: document.querySelector(`[data-toggle="setTrackMute"][data-track="${t}"]`)?.classList.contains('on'),
+      soloed: document.querySelector(`[data-toggle="setTrackSolo"][data-track="${t}"]`)?.classList.contains('on'),
+    });
+  }
+  return settings;
+}
+
+function bounce() {
+  if (!wasmBytesForWorker) {
+    setStatus('start audio first so the engine is loaded');
+    return;
+  }
+
+  if (!bounceWorker) {
+    bounceWorker = new Worker('bounce-worker.js');
+    bounceWorker.onmessage = (event) => {
+      const data = event.data;
+      if (data.type === 'error') {
+        document.getElementById('bounce-info').textContent = `bounce failed: ${data.message}`;
+        return;
+      }
+
+      // Build the peak pyramid once per bounce, then every repaint reads it
+      // instead of rescanning hundreds of thousands of samples.
+      const built = performance.now();
+      peakCache = new PeakCache(data.left);
+      const cacheMs = performance.now() - built;
+
+      drawWaveformPanel();
+      document.getElementById('bounce-info').textContent =
+        `${data.audioSeconds.toFixed(1)}s rendered in ${data.elapsedMs.toFixed(0)}ms ` +
+        `(${data.realtimeFactor.toFixed(0)}x real time), peak cache ${cacheMs.toFixed(0)}ms`;
+    };
+  }
+
+  const secondsPerTick = 60 / bpm / TICKS_PER_QUARTER;
+  const lengthSamples = Math.ceil(TOTAL_TICKS * secondsPerTick * SAMPLE_RATE) + SAMPLE_RATE; // + release tail
+
+  document.getElementById('bounce-info').textContent = 'rendering…';
+  bounceWorker.postMessage({
+    type: 'bounce',
+    wasmBytes: wasmBytesForWorker.slice(0),
+    sampleRate: SAMPLE_RATE,
+    numTracks: NUM_TRACKS,
+    bpm,
+    notes: arrangement.toNotes(),
+    tracks: collectTrackSettings(),
+    master: {
+      gain: parseFloat(document.getElementById('master').value),
+      saturation: document.getElementById('saturation').value === '1',
+    },
+    lengthSamples,
   });
 }
 
-// Web MIDI is optional: it needs a secure context and user permission, and
-// plenty of browsers do not implement it at all. Nothing above depends on it.
+function drawWaveformPanel() {
+  const canvas = document.getElementById('waveform');
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.round(canvas.clientWidth * ratio);
+  canvas.height = Math.round(120 * ratio);
+  canvas.style.height = '120px';
+
+  const context = canvas.getContext('2d');
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.scale(ratio, ratio);
+
+  // drawWaveform works in CSS pixels; the scale above maps them to the
+  // backing store.
+  const logical = { width: canvas.clientWidth, height: 120, getContext: () => context };
+  drawWaveform(logical, peakCache, { background: '#1a1d23', axis: '#3d4350', wave: '#6ea8fe' });
+}
+
+// --- Web MIDI ---
+
 async function setupWebMidi() {
   const midiStatus = document.getElementById('midi-status');
-
   if (!navigator.requestMIDIAccess) {
     midiStatus.textContent = 'not supported in this browser';
     return;
   }
-
   try {
     const access = await navigator.requestMIDIAccess();
-
     const attach = () => {
       const names = [];
       for (const input of access.inputs.values()) {
@@ -276,9 +331,8 @@ async function setupWebMidi() {
       }
       midiStatus.textContent = names.length > 0 ? names.join(', ') : 'no devices connected';
     };
-
     attach();
-    access.onstatechange = attach; // devices can be plugged in after load
+    access.onstatechange = attach;
   } catch (error) {
     midiStatus.textContent = `unavailable (${error.name})`;
   }
@@ -287,12 +341,9 @@ async function setupWebMidi() {
 function handleMidiMessage(event) {
   const [status, data1, data2] = event.data;
   const command = status & 0xf0;
-
   if (command === 0x90 && data2 > 0) {
     startAudio().then(() => noteOn(armedTrack, data1, data2 / 127));
   } else if (command === 0x80 || (command === 0x90 && data2 === 0)) {
-    // A note-on with zero velocity is a note-off; many controllers send that
-    // instead of a real 0x80 message.
     noteOff(armedTrack, data1);
   } else if (command === 0xb0 && (data1 === 120 || data1 === 123)) {
     panic();
@@ -306,19 +357,37 @@ function panic() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  arrangement = new Arrangement(
+    document.getElementById('timeline'),
+    () => syncArrangement(),
+    (clip) => pianoRoll.setClip(clip),
+  );
+  pianoRoll = new PianoRoll(document.getElementById('pianoroll'), () => syncArrangement());
+
+  // Something to hear on first load rather than an empty grid.
+  arrangement.addClip(0, 0);
+  arrangement.addClip(3, TICKS_PER_BAR);
+
   buildKeyboard();
-  buildSequencer();
   setupControls();
   setupComputerKeyboard();
   setupWebMidi();
+  drawWaveformPanel();
+
+  window.addEventListener('resize', () => {
+    arrangement.resize();
+    pianoRoll.resize();
+    drawWaveformPanel();
+  });
 
   document.getElementById('start').addEventListener('click', startAudio);
   document.getElementById('stop').addEventListener('click', stopAudio);
   document.getElementById('panic').addEventListener('click', panic);
+  document.getElementById('bounce').addEventListener('click', bounce);
 
   document.getElementById('play').addEventListener('click', () => {
     startAudio().then(() => {
-      send({ type: 'setLoopRange', start: 0, end: framesPerStep() * STEPS });
+      send({ type: 'setLoopTicks', start: 0, end: TOTAL_TICKS });
       send({ type: 'transportSetLoop', value: 1 });
       send({ type: 'transportSetPosition', value: 0 });
       send({ type: 'transportPlay' });
@@ -327,6 +396,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('pause').addEventListener('click', () => {
     send({ type: 'transportStop' });
-    document.querySelectorAll('.step.playing').forEach((el) => el.classList.remove('playing'));
+    arrangement.setPlayhead(0, false);
   });
 });

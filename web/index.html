@@ -6,26 +6,21 @@
 <title>DAW engine test bench</title>
 <style>
   :root {
-    --bg: #16181d;
-    --panel: #1e2128;
-    --line: #2e323c;
-    --text: #e6e8ec;
-    --muted: #9aa1ad;
-    --accent: #6ea8fe;
-    --accent-dim: #2c4a7c;
-    --warn: #e5534b;
+    --bg: #16181d; --panel: #1e2128; --line: #2e323c;
+    --text: #e6e8ec; --muted: #9aa1ad; --accent: #6ea8fe;
+    --accent-dim: #2c4a7c; --warn: #e5534b; --ok: #5ac8a8;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 24px 16px 48px;
+    margin: 0; padding: 22px 16px 48px;
     background: var(--bg); color: var(--text);
     font: 14px/1.5 system-ui, -apple-system, sans-serif;
   }
-  main { max-width: 900px; margin: 0 auto; }
+  main { max-width: 1000px; margin: 0 auto; }
   h1 { font-size: 18px; margin: 0 0 4px; }
-  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .sub { color: var(--muted); margin: 0 0 18px; font-size: 13px; }
 
-  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
   button {
     background: var(--panel); color: var(--text); border: 1px solid var(--line);
     border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer;
@@ -33,16 +28,16 @@
   button:hover { border-color: var(--accent); }
   button.on { background: var(--accent-dim); border-color: var(--accent); }
 
-  .readouts { display: flex; gap: 18px; align-items: center; margin-left: auto; font-size: 13px; }
+  .readouts { display: flex; gap: 16px; align-items: center; margin-left: auto; font-size: 13px; }
   .readouts span { color: var(--muted); }
   .readouts b { font-weight: 600; font-variant-numeric: tabular-nums; }
   .peak { width: 90px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
   #peak-fill { height: 100%; width: 0%; background: var(--accent); transition: width 60ms linear; }
   #peak-fill.clipping { background: var(--warn); }
 
-  fieldset { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px 16px 16px; margin: 0; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px 14px; margin: 0 0 16px; }
   legend { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px; }
-  label { display: block; margin-top: 12px; font-size: 13px; color: var(--muted); }
+  label { display: block; margin-top: 10px; font-size: 13px; color: var(--muted); }
   label:first-of-type { margin-top: 0; }
   .row { display: flex; justify-content: space-between; }
   .row b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -52,47 +47,36 @@
     color: var(--text); border: 1px solid var(--line); border-radius: 5px; font: inherit;
   }
 
-  /* Sequencer: label column plus 16 steps. */
-  #sequencer {
-    display: grid; grid-template-columns: 64px repeat(16, 1fr);
-    gap: 4px; margin-bottom: 18px;
-  }
-  .seq-label { font-size: 12px; color: var(--muted); align-self: center; }
-  .step {
-    aspect-ratio: 1; padding: 0; border-radius: 4px;
-    background: var(--panel); border: 1px solid var(--line);
-  }
-  .step.downbeat { border-color: #3d4350; }
-  .step.on { background: var(--accent); border-color: var(--accent); }
-  .step.playing { outline: 2px solid var(--text); outline-offset: 1px; }
+  canvas { display: block; width: 100%; border-radius: 6px; }
+  #timeline { cursor: crosshair; touch-action: none; }
+  #pianoroll { cursor: pointer; touch-action: none; }
 
-  .mixer { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
+  .mixer { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
   .strip { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 10px 12px 12px; }
-  .strip h3 { margin: 0 0 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+  .strip h3 { margin: 0 0 6px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
   .strip .voices { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
   .strip .buttons { display: flex; gap: 6px; margin-top: 10px; }
   .strip .buttons button { flex: 1; padding: 4px 0; font-size: 12px; }
+  .track-meter { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-bottom: 8px; }
+  .track-meter div { height: 100%; width: 0%; background: var(--ok); transition: width 60ms linear; }
 
-  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: 18px; }
+  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
 
-  #keyboard { position: relative; display: flex; height: 130px; margin-bottom: 18px; user-select: none; touch-action: none; }
+  #keyboard { position: relative; display: flex; height: 110px; margin-bottom: 16px; user-select: none; touch-action: none; }
   .key { border-radius: 0 0 4px 4px; cursor: pointer; }
   .key.white { flex: 1; background: #f2f3f5; border: 1px solid #babec7; border-top: none; }
   .key.white.held { background: var(--accent); }
-  .key.black {
-    height: 62%; background: #23262e; border: 1px solid #0c0e12; border-top: none;
-    margin: 0 -1.6%; flex: 0 0 3.2%; z-index: 2; position: relative;
-  }
+  .key.black { height: 62%; background: #23262e; border: 1px solid #0c0e12; border-top: none; margin: 0 -1.4%; flex: 0 0 2.8%; z-index: 2; position: relative; }
   .key.black.held { background: var(--accent); }
 
-  .hint { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 14px; }
   code { background: var(--panel); padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
 <main>
   <h1>DAW engine test bench</h1>
-  <p class="sub">Phase 2: four tracks through a node graph into a saturating master bus, with sample-accurate scheduling.</p>
+  <p class="sub">Phase 3: clips on a timeline, per-track meters, and an offline bounce rendered by a second copy of the same engine.</p>
 
   <div class="bar">
     <button id="start">Start audio</button>
@@ -100,22 +84,40 @@
     <button id="play">Play loop</button>
     <button id="pause">Pause</button>
     <button id="panic">All notes off</button>
+    <button id="bounce">Bounce</button>
     <div class="readouts">
       <div><span>status</span> <b id="status">stopped</b></div>
+      <div><b id="note-count">0 notes</b></div>
       <div class="peak" title="master peak"><div id="peak-fill"></div></div>
     </div>
   </div>
 
-  <fieldset style="margin-bottom:18px">
-    <legend>Pattern</legend>
-    <div id="sequencer"></div>
-    <label class="row"><span>Tempo (BPM)</span><b id="bpm-value">110</b></label>
+  <fieldset>
+    <legend>Arrangement</legend>
+    <canvas id="timeline"></canvas>
+    <label class="row" style="margin-top:12px"><span>Tempo (BPM)</span><b id="bpm-value">110</b></label>
     <input id="bpm" type="range" min="60" max="180" value="110" step="1" />
+    <p class="hint" style="margin-top:8px">
+      Click an empty lane to add a clip. Drag to move it between lanes and in time,
+      drag its right edge to resize, <code>Delete</code> to remove.
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Notes in selected clip</legend>
+    <canvas id="pianoroll"></canvas>
+  </fieldset>
+
+  <fieldset>
+    <legend>Offline bounce</legend>
+    <canvas id="waveform"></canvas>
+    <p class="hint" style="margin-top:8px" id="bounce-info">no bounce yet</p>
   </fieldset>
 
   <div class="mixer">
     <div class="strip">
       <h3>Bass <span class="voices" id="voices-0">0</span></h3>
+      <div class="track-meter"><div id="meter-0"></div></div>
       <label class="row"><span>Gain</span><b id="gain-0-value">0.8</b></label>
       <input id="gain-0" data-param="setTrackGain" data-track="0" type="range" min="0" max="1.5" value="0.8" step="0.01" />
       <label class="row"><span>Pan</span><b id="pan-0-value">-0.6</b></label>
@@ -128,6 +130,7 @@
     </div>
     <div class="strip">
       <h3>Tenor <span class="voices" id="voices-1">0</span></h3>
+      <div class="track-meter"><div id="meter-1"></div></div>
       <label class="row"><span>Gain</span><b id="gain-1-value">0.8</b></label>
       <input id="gain-1" data-param="setTrackGain" data-track="1" type="range" min="0" max="1.5" value="0.8" step="0.01" />
       <label class="row"><span>Pan</span><b id="pan-1-value">-0.2</b></label>
@@ -140,6 +143,7 @@
     </div>
     <div class="strip">
       <h3>Alto <span class="voices" id="voices-2">0</span></h3>
+      <div class="track-meter"><div id="meter-2"></div></div>
       <label class="row"><span>Gain</span><b id="gain-2-value">0.8</b></label>
       <input id="gain-2" data-param="setTrackGain" data-track="2" type="range" min="0" max="1.5" value="0.8" step="0.01" />
       <label class="row"><span>Pan</span><b id="pan-2-value">0.2</b></label>
@@ -152,6 +156,7 @@
     </div>
     <div class="strip">
       <h3>Lead <span class="voices" id="voices-3">0</span></h3>
+      <div class="track-meter"><div id="meter-3"></div></div>
       <label class="row"><span>Gain</span><b id="gain-3-value">0.8</b></label>
       <input id="gain-3" data-param="setTrackGain" data-track="3" type="range" min="0" max="1.5" value="0.8" step="0.01" />
       <label class="row"><span>Pan</span><b id="pan-3-value">0.6</b></label>
@@ -208,20 +213,18 @@
         <option value="1">On (soft knee)</option>
         <option value="0">Off (hard clamp)</option>
       </select>
-      <p class="hint" style="margin-top:12px">
-        Turn saturation off and drive the mix hard to hear the difference the
-        soft knee makes against a hard clamp.
-      </p>
     </fieldset>
   </div>
 
   <p class="hint">
-    Click steps to build a pattern, then <b>Play loop</b>. The armed track receives
-    keyboard input: <code>A</code>&ndash;<code>;</code> white keys, <code>W E T Y U O P</code> black.
-    MIDI input: <b id="midi-status">checking&hellip;</b>
+    The armed track takes keyboard input: <code>A</code>&ndash;<code>;</code> white keys,
+    <code>W E T Y U O P</code> black. MIDI input: <b id="midi-status">checking&hellip;</b>
   </p>
 </main>
 
+<script src="waveform.js"></script>
+<script src="arrangement.js"></script>
+<script src="pianoroll.js"></script>
 <script src="main.js"></script>
 </body>
 </html>
